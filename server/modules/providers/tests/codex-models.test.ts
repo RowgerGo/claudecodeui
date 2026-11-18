@@ -74,6 +74,28 @@ test('lists GPT-6.1 Sol and GPT-6.1 Terra with the effort levels the Codex CLI a
   );
 });
 
+test('lists GPT-6.2 Sol and Astra with the bundled CLI reasoning metadata', async () => {
+  const { models } = JSON.parse(await runChatCodexCli(['debug', 'models', '--bundled'])) as {
+    models: Array<{
+      slug: string;
+      default_reasoning_level: string;
+      supported_reasoning_levels: Array<{ effort: string }>;
+    }>;
+  };
+
+  for (const modelId of ['gpt-6.2-sol', 'gpt-6.2-astra']) {
+    const option = findCodexModel(modelId);
+    const bundled = models.find((model) => model.slug === modelId);
+    assert.ok(option, `${modelId} must be selectable in the UI`);
+    assert.ok(bundled, `${modelId} must have metadata in the CLI chats run`);
+    assert.equal(option.effort?.default, bundled.default_reasoning_level);
+    assert.deepEqual(
+      option.effort?.values.map((level) => level.value),
+      bundled.supported_reasoning_levels.map((level) => level.effort),
+    );
+  }
+});
+
 test('lists only models the bundled Codex CLI has metadata for', async () => {
   // Any other model still runs, but on fallback metadata: the CLI warns "Model
   // metadata ... not found" (the chat never shows it), sends no default effort

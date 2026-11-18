@@ -15,7 +15,7 @@ import {
   readOptionalString,
 } from '@/shared/utils.js';
 
-/** Curated Codex catalog shipped as immutable CloudCLI defaults. */
+/** Used by the Providers adapter and its tests as CloudCLI's predefined Codex catalog. */
 export const CODEX_PREDEFINED_MODELS: ProviderModelsDefinition = {
   // Chats run the bundled `@openai/codex` CLI, which takes model metadata from
   // its own bundled catalog (`codex debug models --bundled`), from a slug-prefix
@@ -23,6 +23,38 @@ export const CODEX_PREDEFINED_MODELS: ProviderModelsDefinition = {
   // catalog; anything else runs on fallback metadata. So every entry must be
   // one of the bundled catalog's exact slugs, which codex-models.test.ts checks.
   OPTIONS: [
+    {
+      value: 'gpt-6.2-sol',
+      label: 'GPT-6.2 Sol',
+      description: 'Fast, go-to model for coding and everyday work.',
+      effort: {
+        default: 'low',
+        values: [
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'high' },
+          { value: 'xhigh' },
+          { value: 'max' },
+          { value: 'ultra' },
+        ],
+      },
+    },
+    {
+      value: 'gpt-6.2-astra',
+      label: 'GPT-6.2 Astra',
+      description: 'Our most capable model for complex coding and professional work.',
+      effort: {
+        default: 'low',
+        values: [
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'high' },
+          { value: 'xhigh' },
+          { value: 'max' },
+          { value: 'ultra' },
+        ],
+      },
+    },
     {
       value: 'gpt-6-astra',
       label: 'GPT-6 Astra',
