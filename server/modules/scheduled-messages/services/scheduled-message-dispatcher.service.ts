@@ -62,7 +62,7 @@ async function sendClaimedQueuedMessage(
 
   // The registry check and run reservation are separate operations. If a run
   // wins that tiny race, put the turn back so the next poll tries again.
-  if (!result.started && result.error === 'A run was already in progress for this session.') {
+  if (result.retry) {
     sessionDraftsDb.restoreQueuedMessage(candidate);
     return;
   }
@@ -81,7 +81,10 @@ async function sendClaimedQueuedMessage(
 function isSessionBusy(sessionId: string, runtime: ProviderRuntimeGateway): boolean {
   // sessionsSending too: a scheduled turn can complete before its send settles,
   // and the session's next due row would then interrupt this queued turn.
-  return chatRunRegistry.isProcessing(sessionId) || runtime.hasBackgroundWork(sessionId) || sessionsSending.has(sessionId);
+  return chatRunRegistry.isProcessing(sessionId)
+    || runtime.isCodexControlBlockingTurn?.(sessionId) === true
+    || runtime.hasBackgroundWork(sessionId)
+    || sessionsSending.has(sessionId);
 }
 
 /**

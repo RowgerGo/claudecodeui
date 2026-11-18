@@ -211,6 +211,12 @@ function controlFailed(error: unknown, goal?: CodexGoal | null): CodexControlRes
   };
 }
 
+function sameGoal(current: CodexGoal | null, expected: CodexGoal): boolean {
+  return current?.threadId === expected.threadId
+    && current.createdAt === expected.createdAt
+    && current.objective === expected.objective;
+}
+
 function readGoal(value: unknown, threadId: string): CodexGoal | null {
   if (value === null) return null;
   const goal = readObjectRecord(value);
@@ -315,6 +321,7 @@ class CodexThreadConnection {
   private activeTurn?: Turn;
   private pendingTurn?: PendingTurn;
   private compaction?: PendingCompaction;
+  private goalMutation = false;
   private goal: CodexGoal | null = null;
   private goalVersion = 0;
   private goalReaders = 0;
@@ -360,7 +367,7 @@ class CodexThreadConnection {
   }
 
   private changingThread() {
-    return Boolean(this.activeTurn || this.pendingTurn || this.compaction);
+    return Boolean(this.activeTurn || this.pendingTurn || this.compaction || this.goalMutation);
   }
 
   private hasGoalTurn() {
@@ -941,9 +948,19 @@ class CodexThreadConnection {
         if (this.goalReaders === 0 && !this.blocksUserTurn()) this.close();
       }
     }
-    if (this.compaction) return controlRejected('GOAL_COMPACTION_IN_PROGRESS');
-    this.closeIfIdle();
-    return controlRejected('GOAL_UNAVAILABLE');
+    const startsGoalTurn = operation.action === 'set' || operation.action === 'replace' || operation.action === 'resume';
+    if (startsGoalTurn && this.compaction) return controlRejected('GOAL_COMPACTION_IN_PROGRESS');
+    if (this.goalMutation) return controlRejected('GOAL_BUSY');
+    this.goalMutation = true;
+    this.sessionSummary = options.sessionSummary ?? this.sessionSummary;
+    try {
+      return await this.mutateGoal(options, operation, hooks);
+    } catch (error) {
+      return controlFailed(error);
+    } finally {
+      this.goalMutation = false;
+      this.closeIfIdle();
+    }
   }
 
   private async compact(options: AnyRecord, hooks: CodexControlHooks): Promise<CodexControlResult> {
@@ -951,7 +968,7 @@ class CodexThreadConnection {
       this.closeIfIdle();
       return controlRejected('COMPACT_NO_HISTORY');
     }
-    if (this.compaction || this.hasCompactionConflict(hooks)) {
+    if (this.compaction || this.hasCompactionConflict(hooks) || this.goalMutation) {
       this.closeIfIdle();
       return controlRejected('COMPACT_BUSY');
     }
@@ -1005,6 +1022,76 @@ class CodexThreadConnection {
     return Boolean(this.activeTurn || this.pendingTurn || this.nativeThreadActive || hooks.isTurnRunning());
   }
 
+  private async mutateGoal(
+    options: AnyRecord,
+    operation: Exclude<ChatCodexOperation, { kind: 'compact' }>,
+    hooks: CodexControlHooks,
+  ): Promise<CodexControlResult> {
+    const current = await this.getGoal();
+    if (operation.action === 'set' && current && current.status !== 'complete') {
+      return controlRejected('GOAL_REPLACEMENT_REQUIRED', current);
+    }
+    if ('expectedGoal' in operation && operation.expectedGoal && !sameGoal(current, operation.expectedGoal)) {
+      return controlRejected('GOAL_CHANGED', current);
+    }
+    if (!current && operation.action !== 'set' && operation.action !== 'clear') return controlRejected('GOAL_NO_GOAL', null);
+
+    // Pausing or clearing a stored goal never needs to bring up its live
+    // thread: resuming a thread can start native goal work.
+    const startsThread = !this.threadId;
+    if (operation.action === 'set' || operation.action === 'replace' || operation.action === 'resume' || operation.action === 'edit') {
+      await this.openThreadForControl(options, hooks);
+    }
+    const connection = await this.connected.promise;
+    const threadId = this.threadId;
+    if (!threadId) throw new Error('Codex did not open a persistent thread.');
+
+    if (operation.action === 'clear') {
+      const version = this.goalVersion;
+      const response = readObjectRecord(await connection.call('thread/goal/clear', { threadId, origin: 'user' }));
+      if (version === this.goalVersion) this.setGoal(null);
+      hooks.onAccepted();
+      return { status: 'completed', cleared: response?.cleared === true, goal: this.goal };
+    }
+
+    const replacing = operation.action === 'replace' || (operation.action === 'set' && current?.status === 'complete');
+    if (replacing) {
+      const latest = await this.getGoal();
+      if (!current || !sameGoal(latest, current) || (operation.action === 'set' && latest?.status !== 'complete')) {
+        return controlRejected('GOAL_CHANGED', latest);
+      }
+      const clear = readObjectRecord(await connection.call('thread/goal/clear', { threadId, origin: 'user' }));
+      if (!clear?.cleared) return controlRejected('GOAL_CHANGED', await this.getGoal());
+    }
+    if (operation.action === 'edit' && operation.expectedGoal) {
+      const latest = await this.getGoal();
+      if (!sameGoal(latest, operation.expectedGoal)) return controlRejected('GOAL_CHANGED', latest);
+    }
+    const params: AnyRecord = { threadId, origin: 'user' };
+    if ('objective' in operation) params.objective = operation.objective;
+    if (operation.action === 'pause') params.status = 'paused';
+    if (operation.action === 'resume' || operation.action === 'set' || operation.action === 'replace') params.status = 'active';
+
+    try {
+      const version = this.goalVersion;
+      const response = readObjectRecord(await connection.call('thread/goal/set', params));
+      const goal = readGoal(response?.goal, threadId);
+      if (version === this.goalVersion || (replacing && !this.goal)) this.setGoal(goal);
+      hooks.onAccepted();
+      return { status: 'completed', goal: this.goal };
+    } catch (error) {
+      // The CLI creates persistent threads lazily. On a definitive refusal to
+      // set the first goal, let the app remove the unusable blank mapping.
+      if (startsThread && !this.activeTurn && !this.goal
+        && error instanceof AppError && error.code === 'CODEX_APP_SERVER_ERROR') {
+        hooks.discardUnmaterializedThread?.(threadId);
+      }
+      if (!replacing) throw error;
+      // Clearing and setting are distinct native RPCs. If set failed, report
+      // the provider's resulting state and let the browser keep its new draft.
+      return controlFailed(error, await this.getGoal().catch(() => undefined));
+    }
+  }
 }
 
 function getThreadConnection(

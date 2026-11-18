@@ -783,6 +783,15 @@ export function useSessionStore() {
     notify(sessionId);
   }, [getSlot, notify]);
 
+  const removeOptimisticSend = useCallback((sessionId: string, messageId: string) => {
+    const slot = getSlot(sessionId);
+    const index = slot.realtimeMessages.findIndex((row) => row.id === `local_${messageId}`);
+    if (index < 0) return;
+    slot.realtimeMessages = slot.realtimeMessages.filter((_, rowIndex) => rowIndex !== index);
+    recomputeMergedIfNeeded(slot);
+    notify(sessionId);
+  }, [getSlot, notify]);
+
   /**
    * Refreshes only the persisted tail and stitches it onto the contiguous
    * cached suffix. Large turns request a small offset bridge rather than the
@@ -890,6 +899,7 @@ export function useSessionStore() {
     fetchFromServer,
     fetchMore,
     appendRealtime,
+    removeOptimisticSend,
     truncateAt,
     refreshLatestFromServer,
     setActiveSession,
@@ -899,7 +909,7 @@ export function useSessionStore() {
     getMessages,
     getSessionSlot,
   }), [
-    fetchFromServer, fetchMore, appendRealtime, truncateAt, refreshLatestFromServer,
+    fetchFromServer, fetchMore, appendRealtime, removeOptimisticSend, truncateAt, refreshLatestFromServer,
     setActiveSession, isStale, updateStreaming, finalizeStreaming,
     getMessages, getSessionSlot,
   ]);

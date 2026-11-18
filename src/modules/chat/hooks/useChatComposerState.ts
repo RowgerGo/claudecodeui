@@ -15,8 +15,32 @@ import { useTranslation } from 'react-i18next';
 import { api, ApiRequestError } from '@/shared/api';
 import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
 import { readUserPreference } from '@/shared/userSettings';
-import type { BackgroundSendChoice, BackgroundSendPrompt, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, PendingSteer, QueuedDraft, SessionActivityMap, StatusCommandData, SteerOutcome,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
-import type { CodexChatOperation } from '@/shared/types';
+import { createChatRequestId } from '@/shared/utils';
+import type {
+  BackgroundSendChoice,
+  BackgroundSendPrompt,
+  ChatAttachment,
+  ChatMessage,
+  CodexChatOperation,
+  CommandModalPayload,
+  CostCommandData,
+  HelpCommandData,
+  LLMProvider,
+  MarkSessionProcessing,
+  ModelCommandData,
+  PendingPermissionRequest,
+  PendingSteer,
+  PermissionMode,
+  Project,
+  ProjectSession,
+  QueuedDraft,
+  QueuedSendOptions,
+  SessionActivityMap,
+  SessionEstablishedContext,
+  SlashCommand,
+  StatusCommandData,
+  SteerOutcome,
+} from '@/shared/types';
 import { grantClaudeToolPermission } from '@/modules/chat/utils/chatPermissions';
 import {
   appendQueuedMessage,
@@ -63,6 +87,8 @@ type UseChatComposerStateArgs = {
   codexSteerByDefault?: boolean;
   /** Active Codex turn for the viewed session, if the server has started one. */
   activeCodexTurnId?: string;
+  /** A native goal may be between turns while it still owns the conversation. */
+  hasActiveCodexGoal?: boolean;
   onSessionProcessing?: MarkSessionProcessing;
   /**
    * Invoked with the freshly allocated session id when the user sends the
@@ -84,7 +110,7 @@ type UseChatComposerStateArgs = {
     editAfterQuery?: boolean,
   ) => void;
   scrollToBottom: () => void;
-  addMessage: (msg: ChatMessage) => void;
+  addMessage: (msg: ChatMessage, sessionId?: string) => void;
   setIsUserScrolledUp: (isScrolledUp: boolean) => void;
   setPendingPermissionRequests: Dispatch<SetStateAction<PendingPermissionRequest[]>>;
   /** From the capability matrix, exactly like `supportsSessionForking`; false until it has loaded. Gates the `/btw` branch. */
@@ -151,23 +177,6 @@ async function createChatSession(project: Project, provider: LLMProvider, initia
   return { sessionId, summary: (typeof sessionName === 'string' && sessionName.trim()) || summary };
 }
 
-/**
- * A v4 UUID for a steered message. The id becomes the message's transcript
- * uuid, so it must be a real one. `crypto.randomUUID` only exists in secure
- * contexts, and the app is often opened over plain http on a LAN address
- * (a phone on the same network), so this falls back to `getRandomValues`.
- */
-const createSteerMessageId = (): string => {
-  if (typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-};
-
 /** Whether a live user message is the echo of the steered message with this id. */
 const isEchoOfSteer = (echoId: string, messageId: string): boolean => (
   // A text-only message is echoed under its own id; one with images is split
@@ -177,6 +186,7 @@ const isEchoOfSteer = (echoId: string, messageId: string): boolean => (
 
 const MAX_ATTACHMENT_COUNT = 10;
 const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+const NO_ATTACHMENTS: File[] = [];
 
 const isImageAttachment = (attachment: ChatAttachment) => {
   if (attachment.mimeType?.startsWith('image/')) return true;
@@ -304,6 +314,7 @@ export function useChatComposerState({
   supportsSteering = false,
   codexSteerByDefault = false,
   activeCodexTurnId,
+  hasActiveCodexGoal = false,
   onSessionProcessing,
   onSessionEstablished,
   onFileOpen,
@@ -316,6 +327,10 @@ export function useChatComposerState({
   setPendingPermissionRequests,
 }: UseChatComposerStateArgs) {
   const { t } = useTranslation('chat');
+  // Prefer the newly allocated id before the router delivers selectedSession.
+  const sessionKey = selectedSession?.id || currentSessionId || null;
+  const selectedProjectId = selectedProject?.projectId;
+  const draftScope = sessionKey ?? (selectedProjectId ? `project:${selectedProjectId}` : null);
   // The composer text together with the chat scope it belongs to. They are one
   // state rather than a value plus a ref because they have to move in lockstep:
   // on a session switch there is one commit where the scope has already changed
@@ -347,10 +362,31 @@ export function useChatComposerState({
     };
   });
   const input = inputState.value;
-  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  // Other providers share the existing attachment picker state.
+  const [unscopedFiles, setUnscopedFiles] = useState<File[]>([]);
+  // Goal operations leave browser File objects with the Codex draft they came from.
+  const [codexFilesByScope, setCodexFilesByScope] = useState(() => new Map<string, File[]>());
+  const codexAttachmentScope = provider === 'codex' ? draftScope : null;
+  const attachedFiles = codexAttachmentScope ? codexFilesByScope.get(codexAttachmentScope) ?? NO_ATTACHMENTS : unscopedFiles;
+  const setAttachedFiles: Dispatch<SetStateAction<File[]>> = useCallback((update) => {
+    if (!codexAttachmentScope) {
+      setUnscopedFiles(update);
+      return;
+    }
+    setCodexFilesByScope((current) => {
+      const previous = current.get(codexAttachmentScope) ?? NO_ATTACHMENTS;
+      const files = typeof update === 'function' ? update(previous) : update;
+      const next = new Map(current);
+      if (files.length) next.set(codexAttachmentScope, files);
+      else next.delete(codexAttachmentScope);
+      return next;
+    });
+  }, [codexAttachmentScope]);
   const [fileErrors, setFileErrors] = useState<Map<string, string>>(new Map());
   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
   const [commandModalPayload, setCommandModalPayload] = useState<CommandModalPayload | null>(null);
+  // Commands can be refused locally before they have an operation id or even a session.
+  const [codexCommandNotice, setCodexCommandNotice] = useState<{ scope: string | null; content: string; isError: boolean } | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputHighlightRef = useRef<HTMLDivElement>(null);
@@ -364,18 +400,9 @@ export function useChatComposerState({
     ) => Promise<void>) | null
   >(null);
   const inputValueRef = useRef(input);
-  const selectedProjectId = selectedProject?.projectId;
-  // Prefer the stable backend-allocated id (selectedSession.id) but fall back
-  // to currentSessionId for a just-established session that hasn't been
-  // handed back to the parent's `selectedSession` prop yet.
-  const sessionKey = selectedSession?.id || currentSessionId || null;
   // Always the composer's own `sendMessage`, never `useWebSocket()` directly,
   // which throws outside a provider and would break the composer's tests.
   const askSideQuestion = useAskSideQuestion(sendMessage);
-  // The chat scope a draft belongs to: the open session, or the project for a
-  // chat that has not been sent yet and so has no session id. Drafts used to be
-  // keyed by project alone, so every session in a project shared one draft.
-  const draftScope = sessionKey ?? (selectedProjectId ? `project:${selectedProjectId}` : null);
   const draftScopeRef = useRef(draftScope);
   draftScopeRef.current = draftScope;
   // Composition is tracked on `window` in the capture phase rather than on the textarea, so a
@@ -416,6 +443,7 @@ export function useChatComposerState({
   sessionKeyRef.current = sessionKey;
   // Session allocation can wait on the gateway while Enter and menu picks repeat.
   const creatingGoalScopesRef = useRef(new Set<string | null>());
+  // Repeated submits during an upload or session allocation share the same scope.
   const submittingScopesRef = useRef(new Set<string>());
 
   // Recall writes go through the same pair of stores a send reads: the state
@@ -588,6 +616,8 @@ export function useChatComposerState({
 
   const executeCodexCommand = useCallback(async (commandName: string, source: string, fromSubmit: boolean) => {
     if (!selectedProject || !onCodexOperation) return;
+    const scope = draftScopeRef.current;
+    setCodexCommandNotice(null);
     const commandMatch = CODEX_CONTROL_COMMAND.exec(source);
     const matches = commandMatch && `/${commandMatch[1]}` === commandName;
     // Remove the separator after the command and keep the text of the objective as typed.
@@ -602,7 +632,7 @@ export function useChatComposerState({
           ? { type: 'chat.goal', action: argument }
           : { type: 'chat.goal', action: 'set', objective };
     const showMessage = (content: string, type: 'assistant' | 'error' = 'assistant') => {
-      addMessage({ type, content, timestamp: Date.now() });
+      setCodexCommandNotice({ scope, content, isError: type === 'error' });
     };
     if (operation.type === 'chat.compact' && argument) {
       showMessage(t('commands.errors.INVALID_CONTROL_REQUEST'), 'error');
@@ -618,12 +648,11 @@ export function useChatComposerState({
       return;
     }
 
-    if (draft && draftScopeRef.current) {
-      writeDraftText(draftScopeRef.current, draft, { preserveUntilSaved: true });
+    if (draft && scope) {
+      writeDraftText(scope, draft, { preserveUntilSaved: true });
     }
     const sendOptions = buildSendOptions(operation.type === 'chat.goal' && operation.action === 'set' ? objective : '');
     if (!targetSessionId) {
-      const scope = draftScopeRef.current;
       if (creatingGoalScopesRef.current.has(scope) || (!fromSubmit && submittingScopesRef.current.has(scope ?? ''))) return;
       creatingGoalScopesRef.current.add(scope);
       try {
@@ -634,6 +663,20 @@ export function useChatComposerState({
         if (draft) {
           writeDraftText(targetSessionId, draft, { preserveUntilSaved: true });
           if (scope && readDraftText(scope) === draft) writeDraftText(scope, '');
+        }
+        if (scope && attachedFiles.length) {
+          const newScope = targetSessionId;
+          setCodexFilesByScope((current) => {
+            const source = current.get(scope) ?? NO_ATTACHMENTS;
+            const moved = source.filter((file) => attachedFiles.includes(file));
+            if (!moved.length) return current;
+            const next = new Map(current);
+            const remaining = source.filter((file) => !moved.includes(file));
+            if (remaining.length) next.set(scope, remaining);
+            else next.delete(scope);
+            next.set(newScope, moved);
+            return next;
+          });
         }
         if (draftScopeRef.current === scope) {
           onSessionEstablished?.(targetSessionId, { provider, project: selectedProject, summary: created.summary });
@@ -649,7 +692,7 @@ export function useChatComposerState({
     }
 
     onCodexOperation(targetSessionId, operation, sendOptions, draft, operation.type === 'chat.goal' && argument === 'edit');
-  }, [addMessage, buildSendOptions, isConnected, onCodexOperation, onSessionEstablished, provider, selectedProject, t]);
+  }, [attachedFiles, buildSendOptions, isConnected, onCodexOperation, onSessionEstablished, provider, selectedProject, t]);
 
   const executeCommand = useCallback(
     async (command: SlashCommand, rawInput?: string, options?: { preserveInput?: boolean }) => {
@@ -844,7 +887,7 @@ export function useChatComposerState({
     if (validFiles.length > 0) {
       setAttachedFiles((previous) => [...previous, ...validFiles].slice(0, MAX_ATTACHMENT_COUNT));
     }
-  }, []);
+  }, [setAttachedFiles]);
 
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -1013,8 +1056,6 @@ export function useChatComposerState({
     ): Promise<'queued' | 'unread' | 'queue-unknown' | undefined> => {
       const queuedFromOpenComposer = fromComposer
         && (!queuedSessionKey || sessionKeyRef.current === queuedSessionKey);
-      // Attachments are not kept per chat: the queued ones leave even when another chat is
-      // open now, or a send from there would take them along.
       if (fromComposer) {
         setAttachedFiles((files) => files.filter((file) => !durableDraft.attachments.includes(file)));
       }
@@ -1116,7 +1157,7 @@ export function useChatComposerState({
       }));
       return 'queued';
     },
-    [addMessage, recordSentMessage, resetCommandMenuState, setInput, t],
+    [addMessage, recordSentMessage, resetCommandMenuState, setAttachedFiles, setInput, t],
   );
 
   // Every change to the pending steers goes through here so the ref the
@@ -1140,7 +1181,7 @@ export function useChatComposerState({
   // until the agent reads it. Attachments must already be uploaded.
   const steerIntoRunningTurn = useCallback(
     (message: { content: string; attachments: File[]; uploadedAttachments: unknown[] }, steerSessionKey: string, expectedTurnId?: string) => {
-      const messageId = createSteerMessageId();
+      const messageId = createChatRequestId();
       updatePendingSteers((current) => [...current, {
         messageId,
         sessionKey: steerSessionKey,
@@ -1170,7 +1211,6 @@ export function useChatComposerState({
         return;
       }
       recordSentMessage(message.content, steerSessionKey);
-      // Attachments are not kept per chat: the steered ones leave even when another chat is open now.
       setAttachedFiles((files) => files.filter((file) => !message.attachments.includes(file)));
 
       if (sessionKeyRef.current === steerSessionKey && (!expectedTurnId || inputValueRef.current === message.content)) {
@@ -1191,7 +1231,7 @@ export function useChatComposerState({
         writeDraftText(steerSessionKey, '', { preserveUntilSaved: Boolean(expectedTurnId) });
       }
     },
-    [recordSentMessage, resetCommandMenuState, sendMessage, setInput, updatePendingSteers],
+    [recordSentMessage, resetCommandMenuState, sendMessage, setAttachedFiles, setInput, updatePendingSteers],
   );
 
   /**
@@ -1258,7 +1298,7 @@ export function useChatComposerState({
     });
     const ids = new Set(unread.map((steer) => steer.messageId));
     updatePendingSteers((current) => current.filter((steer) => !ids.has(steer.messageId)));
-  }, [sessionKey, setInput, updatePendingSteers]);
+  }, [sessionKey, setAttachedFiles, setInput, updatePendingSteers]);
 
   // Codex confirms unread explicitly. After a reload, retrieve the original
   // attachment bytes through the same asset API used by the transcript.
@@ -1355,6 +1395,7 @@ export function useChatComposerState({
       // The chat this send belongs to: the upload and session allocation below can outlast a
       // chat switch, and the cleanup at the end must not empty whichever chat is open by then.
       const submittedScope = draftScopeRef.current;
+      setCodexCommandNotice(null);
 
       // Session controls run outside a chat turn, even when this session is busy.
       if (provider === 'codex' && !queuedSubmission && !submitOptions?.skipCommandInterception) {
@@ -1386,7 +1427,7 @@ export function useChatComposerState({
       // A turn is already in flight: stash this message instead of sending it.
       // Upload attached files now so the queued record contains durable image
       // descriptors that can be sent even if another session is open later.
-      if (isLoading) {
+      if (isLoading || hasActiveCodexGoal) {
         // A run can restart in the tiny gap between scheduling and flushing a
         // queued submission. Put the same durable draft back without uploading
         // its files again.
@@ -1562,8 +1603,10 @@ export function useChatComposerState({
       }
 
       const attachmentRecords = uploadedAttachments as ChatAttachment[];
+      const messageId = provider === 'codex' && !editingAnchorId ? createChatRequestId() : undefined;
       const userMessage: ChatMessage = {
         type: 'user',
+        ...(messageId ? { optimisticMessageId: messageId } : {}),
         content: currentInput,
         images: attachmentRecords.filter(isImageAttachment),
         files: attachmentRecords.filter((attachment) => !isImageAttachment(attachment)),
@@ -1574,7 +1617,7 @@ export function useChatComposerState({
         ...(editingAnchorId ? { replacesAnchorId: editingAnchorId } : {}),
       };
 
-      addMessage(userMessage);
+      addMessage(userMessage, messageId ? targetSessionId : undefined);
       // Mark this request as processing in the per-session activity map (the
       // single source of truth the indicator derives from). The id is always
       // concrete at this point — no pending placeholder exists anymore.
@@ -1595,6 +1638,7 @@ export function useChatComposerState({
         // report why it was refused.
         type: editingAnchorId ? 'chat.edit-send' : 'chat.send',
         sessionId: targetSessionId,
+        ...(messageId ? { messageId } : {}),
         ...(editingAnchorId ? { anchorId: editingAnchorId } : {}),
         content: messageContent,
         options: {
@@ -1610,7 +1654,6 @@ export function useChatComposerState({
       // navigated to. Queued drafts were recorded when they were queued; the
       // consecutive-duplicate check keeps this second call a no-op.
       recordSentMessage(currentInput, targetSessionId);
-      // Attachments are not kept per chat, so only the ones just sent go.
       setAttachedFiles((files) => files.filter((file) => !currentAttachments.includes(file)));
       // A brand-new chat moves from its project scope to its allocated session id meanwhile.
       const stillOpen = draftScopeRef.current === submittedScope || draftScopeRef.current === targetSessionId;
@@ -1643,6 +1686,7 @@ export function useChatComposerState({
       currentSessionId,
       editingAnchorId,
       executeCommand,
+      hasActiveCodexGoal,
       isLoading,
       onSessionProcessing,
       onSessionEstablished,
@@ -1653,6 +1697,7 @@ export function useChatComposerState({
       scrollToBottom,
       selectedProject,
       sendMessage,
+      setAttachedFiles,
       sessionKey,
       addMessage,
       setIsUserScrolledUp,
@@ -1666,11 +1711,6 @@ export function useChatComposerState({
     ],
   );
 
-  // Chat scopes with a submit still awaiting its upload or, for a brand-new
-  // chat, its session id. The composer does not change until that returns (the
-  // text stays, send stays enabled), so on a slow server the user submits
-  // again — and each extra submit of a new chat allocated its own session and
-  // sent it the same first message.
   const handleSubmit = useCallback(
     async (
       event: FormEvent<HTMLFormElement> | MouseEvent | TouchEvent | KeyboardEvent<HTMLTextAreaElement>,
@@ -1719,6 +1759,18 @@ export function useChatComposerState({
   useEffect(() => {
     handleSubmitRef.current = handleSubmit;
   }, [handleSubmit]);
+
+  const handleCodexQueuedSend = useCallback(async (queuedSessionId: string) => {
+    // The native continuation won admission. Read the queue the server just
+    // wrote, without resubmitting the original message from the browser.
+    await hydrateChatDrafts();
+    if (sessionKeyRef.current !== queuedSessionId) return;
+    const queued = restoreQueuedDraft(queuedSessionId);
+    queuedDraftSessionRef.current = queuedSessionId;
+    setQueuedDraft((current) => queued && current && extendsQueuedMessage(current, queued)
+      ? { ...queued, attachments: current.attachments }
+      : queued);
+  }, []);
 
   // The VPS dispatcher owns sending. While the card is visible, periodically
   // reconcile it with the server, so the UI notices when the server claims it
@@ -1778,7 +1830,7 @@ export function useChatComposerState({
     inputValueRef.current = queuedDraft.content;
     setAttachedFiles(queuedDraft.attachments);
     textareaRef.current?.focus();
-  }, [queuedDraft]);
+  }, [queuedDraft, setAttachedFiles, setInput]);
 
   const deleteQueuedDraft = useCallback(() => {
     if (queuedDraftSessionRef.current) {
@@ -1875,6 +1927,7 @@ export function useChatComposerState({
       const newValue = event.target.value;
       const cursorPos = event.target.selectionStart;
 
+      setCodexCommandNotice(null);
       setInput(newValue);
       inputValueRef.current = newValue;
       setCursorPosition(cursorPos);
@@ -1915,9 +1968,9 @@ export function useChatComposerState({
 
         // A multi-line goal may itself contain a slash. An open suggestion at
         // the cursor should not replace a command that already has arguments.
-        if (provider === 'codex' && !event.shiftKey && !event.altKey
-          && (event.ctrlKey || event.metaKey || (!sendByCtrlEnter && !isSoftKeyboardEnvironment()))
-          && CODEX_CONTROL_COMMAND.exec(inputValueRef.current)?.[2]) {
+        const codexControl = provider === 'codex' && CODEX_CONTROL_COMMAND.exec(inputValueRef.current);
+        if (codexControl && (codexControl[2] || selectedCommandIndex < 0) && !event.shiftKey && !event.altKey
+          && (event.ctrlKey || event.metaKey || (!sendByCtrlEnter && !isSoftKeyboardEnvironment()))) {
           void handleSubmit(event);
           return;
         }
@@ -1968,6 +2021,7 @@ export function useChatComposerState({
       handleHistoryKeyDown,
       handleSubmit,
       provider,
+      selectedCommandIndex,
       sendByCtrlEnter,
       sessionKey,
       showCommandMenu,
@@ -2089,6 +2143,7 @@ export function useChatComposerState({
   return {
     input,
     isCodexControlInput: provider === 'codex' && CODEX_CONTROL_COMMAND.test(input),
+    codexCommandNotice: codexCommandNotice?.scope === draftScope ? codexCommandNotice : null,
     setInput,
     editingAnchorId,
     beginEditMessage,
@@ -2122,6 +2177,7 @@ export function useChatComposerState({
     backgroundSendPrompt,
     resolveBackgroundSendPrompt,
     queuedDraft,
+    handleCodexQueuedSend,
     editQueuedDraft,
     deleteQueuedDraft,
     pendingSteers: visiblePendingSteers,

@@ -171,6 +171,39 @@ test('a finished run\'s safety net cannot complete the session\'s next run', asy
   });
 });
 
+test('a native Codex turn can win admission over an unbound send and replay by its own turn id', async () => {
+  await withIsolatedDatabase(() => {
+    const appSessionId = 'app-codex-native';
+    sessionsDb.createAppSession(appSessionId, 'codex', '/workspace/demo');
+    const tab = new FakeConnection();
+    chatRunRegistry.setCodexSubscriptions(tab, new Set([appSessionId]));
+    const pending = chatRunRegistry.startRun({
+      appSessionId, provider: 'codex', providerSessionId: 'native-thread', connection: null, userId: null,
+    });
+    assert.ok(pending);
+
+    const hooks = chatRunRegistry.createCodexHooks({ appSessionId, userId: null });
+    const first = hooks.startTurn('native-thread', 'native-a');
+    assert.ok(first);
+    first.send({ kind: 'turn_started', provider: 'codex', turnId: 'native-a' });
+    first.send({ kind: 'complete', provider: 'codex', exitCode: 0 });
+    const next = hooks.startTurn('native-thread', 'native-b');
+    assert.ok(next);
+    assert.equal(hooks.startTurn('native-thread', 'native-b'), next);
+    assert.equal(hooks.startTurn('native-thread', 'unexpected'), null);
+    next.send({ kind: 'turn_started', provider: 'codex', turnId: 'native-b' });
+    next.send({ kind: 'text', provider: 'codex', content: 'turn B output' });
+
+    chatRunRegistry.completeRunIfCurrent(pending, { exitCode: 1 });
+    assert.equal(chatRunRegistry.getRun(appSessionId)?.turnId, 'native-b');
+    assert.equal(chatRunRegistry.isProcessing(appSessionId), true);
+    assert.deepEqual(chatRunRegistry.replayEvents(appSessionId, 1).map(({ turnId, content }) => [turnId, content]), [
+      ['native-b', 'turn B output'],
+    ]);
+    assert.equal(tab.frames.filter(({ kind }) => kind === 'complete').length, 1);
+  });
+});
+
 test('listRunningRuns returns only currently running app sessions', async () => {
   await withIsolatedDatabase(() => {
     sessionsDb.createAppSession('app-run-7', 'claude', '/workspace/demo');

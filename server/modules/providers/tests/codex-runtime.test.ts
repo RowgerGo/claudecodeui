@@ -256,9 +256,11 @@ function scriptedControlServer(t: TestContext, initialGoal: CodexGoal | null = n
   let threadMetadata: AnyRecord = {};
   let setFailure: Error | undefined;
   let boundThread: string | undefined;
+  let discardedThread: string | undefined;
   let onCompactionStart: (() => void) | undefined;
   const hooks: CodexControlHooks = {
     bindThread: (id) => { boundThread = id; },
+    discardUnmaterializedThread: (id) => { discardedThread = id; },
     isTurnRunning: () => activeRun,
     startTurn: (_id, turnId) => {
       const recorded = recordMessages();
@@ -361,6 +363,7 @@ function scriptedControlServer(t: TestContext, initialGoal: CodexGoal | null = n
     beforeCompactionReply: (callback: () => void) => { onCompactionStart = callback; },
     get accepted() { return acceptCount; },
     get connections() { return connections; },
+    get discardedThread() { return discardedThread; },
   };
 }
 
@@ -487,4 +490,104 @@ test('reopening a thread for compaction restores the provider-owned rollout sett
       sandbox_workspace_write: { writable_roots: [directory], network_access: false },
     },
   });
+});
+
+test('a goal-first session consumes two native turns on one connection and targets its new turn', async (t) => {
+  const server = scriptedControlServer(t);
+  assert.deepEqual(await server.goal({ kind: 'goal', action: 'get' }, false), { status: 'completed', goal: null });
+  assert.equal(server.connections, 0);
+
+  const result = await server.goal({ kind: 'goal', action: 'set', objective: 'First phase\nSecond phase' }, false);
+  assert.equal(result.status, 'completed');
+  assert.equal(server.calls.find(({ method }) => method === 'thread/start')?.params.ephemeral, false);
+  assert.deepEqual(server.calls.find(({ method }) => method === 'thread/goal/set')?.params, {
+    threadId: pausedGoal.threadId, objective: 'First phase\nSecond phase', status: 'active', origin: 'user',
+  });
+
+  server.turn('turn-a');
+  server.turn('turn-a', 'completed');
+  server.turn('turn-b');
+  server.send('item/agentMessage/delta', { turnId: 'turn-b', itemId: 'message-b', delta: 'second turn' });
+  const options = { expectedTurnId: 'turn-b', messageId: 'message-id' };
+  assert.equal(await codexRuntime.steer(server.appSessionId, 'next step', options), true);
+  assert.equal(await codexRuntime.abort(server.appSessionId, 'turn-a'), false);
+  assert.deepEqual(await server.goal({ kind: 'goal', action: 'pause' }), {
+    status: 'completed', goal: { ...result.goal, status: 'paused' },
+  });
+  assert.equal(await codexRuntime.abort(server.appSessionId, 'turn-b'), true);
+
+  for (const id of ['turn-a', 'turn-b']) {
+    assert.equal(server.turns.get(id)?.messages.filter((row) => row.kind === 'complete').length, 1);
+  }
+  assert.equal(server.turns.get('turn-b')?.messages.find((row) => row.id === 'message-b')?.content, 'second turn');
+  assert.equal(server.calls.filter(({ method }) => method === 'turn/start').length, 0);
+  assert.deepEqual(server.calls.filter(({ method }) => method === 'turn/interrupt').map(({ params }) => params.turnId), ['turn-b']);
+  assert.deepEqual(server.calls.filter(({ method }) => method === 'turn/steer').map(({ params }) => params.expectedTurnId), ['turn-b']);
+  assert.equal(server.connections, 1);
+});
+
+test('queued input cannot steer a native continuation that claims the thread between turns', async (t) => {
+  const active = { ...pausedGoal, status: 'active' } as const;
+  const server = scriptedControlServer(t, pausedGoal);
+  assert.equal((await server.goal({ kind: 'goal', action: 'resume' })).status, 'completed');
+  server.turn('turn-a');
+  server.turn('turn-a', 'completed');
+  server.send('thread/status/changed', { status: { type: 'idle' } });
+
+  assert.equal(codexRuntime.isCodexControlBlockingTurn(server.appSessionId), true);
+  await assert.rejects(server.sendQueued, { code: 'CODEX_TURN_BUSY' });
+  assert.equal(server.calls.filter(({ method }) => method === 'turn/start').length, 0);
+
+  server.send('thread/status/changed', { status: { type: 'active' } });
+  server.turn('turn-b');
+  server.send('thread/goal/updated', { turnId: 'turn-b', goal: { ...active, status: 'complete' } });
+  await assert.rejects(server.sendQueued, { code: 'CODEX_TURN_BUSY' });
+  server.turn('turn-b', 'completed');
+  server.send('thread/status/changed', { status: { type: 'idle' } });
+  // Update the persistent state too, since the settled connection can close.
+  await server.goal({ kind: 'goal', action: 'clear' });
+  assert.equal(codexRuntime.isCodexControlBlockingTurn(server.appSessionId), false);
+
+  await server.sendQueued();
+  assert.equal(server.calls.filter(({ method }) => method === 'turn/start').length, 1);
+  assert.equal(server.calls.filter(({ method }) => method === 'turn/steer').length, 0);
+});
+
+test('goal edits preserve budget and pause state while failed confirmed replacement rereads the goal', async (t) => {
+  const server = scriptedControlServer(t, pausedGoal);
+  const query = await server.goal({ kind: 'goal', action: 'get' });
+  assert.deepEqual(query, { status: 'completed', goal: pausedGoal });
+  assert.deepEqual(server.calls.map(({ method }) => method), ['thread/goal/get']);
+  assert.deepEqual(await server.goal({ kind: 'goal', action: 'set', objective: 'New goal' }), {
+    status: 'rejected', code: 'GOAL_REPLACEMENT_REQUIRED', goal: pausedGoal,
+  });
+  const edited = { ...pausedGoal, objective: 'Edited goal' };
+  assert.deepEqual(await server.goal({ kind: 'goal', action: 'edit', objective: edited.objective, expectedGoal: pausedGoal }), {
+    status: 'completed', goal: edited,
+  });
+  assert.deepEqual(server.calls.find(({ method }) => method === 'thread/goal/set')?.params, {
+    threadId: pausedGoal.threadId, objective: edited.objective, origin: 'user',
+  });
+  assert.deepEqual(await server.goal({ kind: 'goal', action: 'replace', objective: 'New goal', expectedGoal: pausedGoal }), {
+    status: 'rejected', code: 'GOAL_CHANGED', goal: edited,
+  });
+
+  server.failNextGoalSet();
+  assert.deepEqual(await server.goal({ kind: 'goal', action: 'replace', objective: 'New goal', expectedGoal: edited }), {
+    status: 'failed', code: 'CODEX_NATIVE_ERROR', error: 'native goal set failed', goal: null,
+  });
+  assert.deepEqual(server.calls.slice(-3).map(({ method }) => method), ['thread/goal/clear', 'thread/goal/set', 'thread/goal/get']);
+  assert.equal(server.calls.filter(({ method }) => method === 'turn/start').length, 0);
+});
+
+test('a definitively rejected first goal frees its unmaterialized thread mapping', async (t) => {
+  const server = scriptedControlServer(t);
+  server.failNextGoalSet();
+  const result = await server.goal({ kind: 'goal', action: 'set', objective: 'New goal' }, false);
+  assert.deepEqual(result, { status: 'failed', code: 'CODEX_NATIVE_ERROR', error: 'native goal set failed' });
+  assert.equal(server.discardedThread, pausedGoal.threadId);
+  assert.equal(codexRuntime.isCodexControlBlockingTurn(server.appSessionId), false);
+  assert.equal((await server.goal({ kind: 'goal', action: 'set', objective: 'Second try' }, false)).status, 'completed');
+  assert.equal((await server.goal({ kind: 'goal', action: 'clear' })).status, 'completed');
+  assert.equal(server.calls.filter(({ method }) => method === 'thread/start').length, 2);
 });

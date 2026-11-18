@@ -244,6 +244,7 @@ export type MessageKind =
 export type GatewayEventKind =
   | 'chat_subscribed'
   | 'chat_steer_accepted'
+  | 'chat_send_queued'
   | 'chat_operation_status'
   | 'chat_goal_state'
   | 'session_upserted'
@@ -333,6 +334,18 @@ export type ChatGoalStateEvent = {
   sessionId: string;
   goal: CodexGoal | null;
   revision: number;
+  timestamp: string;
+};
+
+/**
+ * A direct Codex send was saved behind a native turn that won admission.
+ * The message id lets the sending view reconcile its optimistic transcript row.
+ */
+export type ChatSendQueuedEvent = {
+  kind: 'chat_send_queued';
+  sessionId: string;
+  messageId?: string;
+  turnId: string | null;
   timestamp: string;
 };
 

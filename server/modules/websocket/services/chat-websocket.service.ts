@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import type { WebSocket } from 'ws';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { sessionDraftsDb, sessionsDb } from '@/modules/database/index.js';
 import {
   MAX_CONCURRENT_SIDE_QUESTIONS_PER_SESSION,
   providerCapabilitiesService,
@@ -29,6 +29,7 @@ import type {
   AnyRecord,
   AuthenticatedWebSocketRequest,
   ChatCodexOperation,
+  ChatSendQueuedEvent,
   CodexControlHooks,
   CodexControlResult,
   LLMProvider,
@@ -38,7 +39,7 @@ import type {
   SideQuestionEvent,
   SideQuestionRuntime,
 } from '@/shared/types.js';
-import { AppError, parseIncomingJsonObject, SIDE_QUESTION_ID_PATTERN } from '@/shared/utils.js';
+import { AppError, parseIncomingJsonObject, readQueuedChatMessage, SIDE_QUESTION_ID_PATTERN } from '@/shared/utils.js';
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -91,7 +92,7 @@ export type ProviderRuntimeGateway = SideQuestionRuntime & {
     options: AnyRecord,
     writer: ProviderRuntimeWriter,
   ): Promise<unknown>;
-  abort(provider: LLMProvider, sessionId: string): Promise<boolean>;
+  abort(provider: LLMProvider, sessionId: string, expectedTurnId?: string): Promise<boolean>;
   stopBackgroundTask(provider: LLMProvider, sessionId: string, taskId: string): Promise<boolean>;
   /** Delivers a message into the session's running turn; false when no turn can take it. */
   steer(provider: LLMProvider, sessionId: string, command: string, options: AnyRecord): Promise<boolean>;
@@ -173,6 +174,18 @@ function readRequiredSessionId(data: AnyRecord): string | null {
   return sessionId.length > 0 ? sessionId : null;
 }
 
+function sendCodexQueued(ws: WebSocket, sessionId: string, messageId?: string): void {
+  const run = chatRunRegistry.getRun(sessionId);
+  const event: ChatSendQueuedEvent = {
+    kind: 'chat_send_queued',
+    sessionId,
+    messageId,
+    turnId: run?.status === 'running' ? run.turnId : null,
+    timestamp: new Date().toISOString(),
+  };
+  sendJson(ws, event);
+}
+
 /**
  * Handles `chat.send`: resolves the session row (provider, project path, and
  * provider-native id all come from the database — never from the client),
@@ -189,7 +202,47 @@ async function handleChatSend(
     return;
   }
 
-  await dispatchRun(ws, userId, resolved.sessionId, resolved.session, data, dependencies);
+  const { sessionId, session, provider } = resolved;
+  if (provider !== 'codex') {
+    await dispatchRun(ws, userId, sessionId, session, data, dependencies);
+    return;
+  }
+
+  const messageId = typeof data.messageId === 'string' && UUID_PATTERN.test(data.messageId) ? data.messageId : undefined;
+  const receipt = messageId ? chatRunRegistry.reserveCodexSend(sessionId, messageId) : undefined;
+  if (receipt?.prior) {
+    if (receipt.prior === 'queued') sendCodexQueued(ws, sessionId, messageId);
+    return;
+  }
+
+  try {
+    chatRunRegistry.addCodexSubscription(ws, sessionId);
+    const result = await dispatchRun(ws, userId, sessionId, session, data, dependencies);
+    if (!result.retry) {
+      receipt?.finish(result.started ? 'sent' : undefined);
+      return;
+    }
+
+    // A native continuation can begin while a tab still sees idle. Transfer
+    // its unsent message to the same persistent queue the composer uses.
+    const clientOptions = (data.options ?? {}) as AnyRecord;
+    const attachments = readVerifiedAttachments(clientOptions);
+    const message = readQueuedChatMessage({ content: data.content ?? '', options: clientOptions, attachments });
+    const queued = message && Number.isSafeInteger(Number(userId)) && Number(userId) > 0
+      ? sessionDraftsDb.appendQueuedMessage(Number(userId), sessionId, message)
+      : null;
+    if (!queued) {
+      receipt?.finish();
+      sendProtocolError(ws, 'RUN_IN_PROGRESS', result.error ?? 'The session is already running.', sessionId);
+      return;
+    }
+    receipt?.finish('queued');
+    sendCodexQueued(ws, sessionId, messageId);
+    if (!chatRunRegistry.isProcessing(sessionId)) chatRunRegistry.notifySessionMayBeIdle(sessionId);
+  } catch (error) {
+    receipt?.finish();
+    throw error;
+  }
 }
 
 type ResolvedSendTarget = {
@@ -274,6 +327,7 @@ async function dispatchRun(
   beforeRun?: (run: NonNullable<ReturnType<typeof chatRunRegistry.startRun>>) => void | Promise<void>,
 ): Promise<ChatDispatchResult> {
   const provider = session.provider as LLMProvider;
+  const busyRecipient = provider !== 'codex' || data.type !== 'chat.send' ? ws : null;
 
   const controlBlocking = provider === 'codex' && dependencies.runtime.isCodexControlBlockingTurn?.(sessionId);
   const run = controlBlocking ? null : chatRunRegistry.startRun({
@@ -285,15 +339,15 @@ async function dispatchRun(
   });
 
   if (!run) {
-    if (ws) {
+    if (busyRecipient) {
       sendProtocolError(
-        ws,
+        busyRecipient,
         'RUN_IN_PROGRESS',
         `Session "${sessionId}" already has a run in progress.`,
         sessionId
       );
     }
-    return { started: false, error: 'A run was already in progress for this session.', retry: true };
+    return { started: false, error: 'A run is already in progress for this session.', retry: true };
   }
 
   const clientOptions = (data.options ?? {}) as AnyRecord;
@@ -344,8 +398,8 @@ async function dispatchRun(
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
     if (provider === 'codex' && error instanceof AppError && error.code === 'CODEX_TURN_BUSY') {
-      if (ws) sendProtocolError(ws, 'RUN_IN_PROGRESS', failure, sessionId);
-      return { started: false, error: 'A run was already in progress for this session.', retry: true };
+      if (busyRecipient) sendProtocolError(busyRecipient, 'RUN_IN_PROGRESS', failure, sessionId);
+      return { started: false, error: failure, retry: true };
     }
     console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: failure });
   } finally {
@@ -722,7 +776,15 @@ async function handleChatAbort(
     return;
   }
 
-  const success = await dependencies.runtime.abort(run.provider, sessionId);
+  const expectedTurnId = typeof data.expectedTurnId === 'string' ? data.expectedTurnId : null;
+  if (run.provider === 'codex' && expectedTurnId !== null && expectedTurnId !== run.turnId) {
+    sendProtocolError(ws, 'STALE_TURN', 'The turn you were stopping has already finished.', sessionId);
+    return;
+  }
+
+  const success = run.provider === 'codex' && run.turnId
+    ? await dependencies.runtime.abort(run.provider, sessionId, run.turnId)
+    : await dependencies.runtime.abort(run.provider, sessionId);
 
   // Scoped to the run that was stopped: a stop can take a round trip, and a
   // new run of the session may have started by the time it returns.
@@ -966,7 +1028,9 @@ export async function runDetachedChatTurn(
     // interrupted run end before this turn's stream begins. The interrupted
     // run's own dispatch settles later through completeRunIfCurrent, which is
     // scoped to that run and cannot touch the one started here.
-    const aborted = await dependencies.runtime.abort(activeRun.provider, input.sessionId);
+    const aborted = activeRun.provider === 'codex' && activeRun.turnId
+      ? await dependencies.runtime.abort(activeRun.provider, input.sessionId, activeRun.turnId)
+      : await dependencies.runtime.abort(activeRun.provider, input.sessionId);
     chatRunRegistry.completeRunIfCurrent(activeRun, {
       exitCode: aborted ? 0 : 1,
       aborted: true,

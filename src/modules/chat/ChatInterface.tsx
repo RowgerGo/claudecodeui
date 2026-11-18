@@ -31,6 +31,7 @@ import {
 import ChatMessagesPane from '@/modules/chat/transcript/ChatMessagesPane';
 import ChatComposer from '@/modules/chat/composer/ChatComposer';
 import { CodexOperationFeedbackList } from '@/modules/chat/composer/CodexOperationFeedbackList';
+import { CodexGoalControls } from '@/modules/chat/composer/CodexGoalControls';
 import CommandResultModal from '@/modules/chat/modals/CommandResultModal';
 
 type ChatInterfaceProps = {
@@ -79,7 +80,8 @@ function ChatInterface({
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings();
   const { subscribe, isConnected } = useWebSocket();
   const { t } = useTranslation('chat');
-  const { operations, dispatchOperation, onOperationReceipt, getPendingOperationIds, dismissOperation, checkStatus } =
+  const { operations, goalStates, dispatchOperation, onOperationReceipt, onGoalState, resetGoalRevisions,
+    getPendingOperationIds, dismissOperation, checkStatus } =
     useCodexChatOperations(sendMessage, isConnected);
   const processingSessions = useProcessingSessions();
   const {
@@ -267,11 +269,16 @@ function ChatInterface({
     }
   }, [handleClearContext, t]);
 
-  const activeCodexTurnId = activeCodexTurns.get(selectedSession?.id || currentSessionId || '');
+  const codexSessionId = provider === 'codex' ? selectedSession?.id || currentSessionId : null;
+  const activeCodexTurnId = codexSessionId ? activeCodexTurns.get(codexSessionId) : undefined;
+  const codexGoal = codexSessionId ? goalStates.get(codexSessionId)?.goal ?? null : null;
+  const visibleCodexOperations = operations.filter((entry) => entry.sessionId === codexSessionId);
+  const hasActiveCodexGoal = codexGoal?.status === 'active';
   const canSteerCurrentTurn = supportsSteering && (provider !== 'codex' || Boolean(activeCodexTurnId));
   const {
     input,
     isCodexControlInput,
+    codexCommandNotice,
     setInput,
     textareaRef,
     inputHighlightRef,
@@ -302,6 +309,7 @@ function ChatInterface({
     backgroundSendPrompt,
     resolveBackgroundSendPrompt,
     queuedDraft,
+    handleCodexQueuedSend,
     editQueuedDraft,
     deleteQueuedDraft,
     pendingSteers,
@@ -345,6 +353,7 @@ function ChatInterface({
     supportsSteering,
     codexSteerByDefault,
     activeCodexTurnId,
+    hasActiveCodexGoal,
     onSessionProcessing,
     onSessionEstablished: handleSessionEstablished,
     onFileOpen,
@@ -380,6 +389,7 @@ function ChatInterface({
   // `chat_subscribed` ack restores or clears the activity indicator, replays
   // missed live events, and re-attaches a still-running stream to this socket.
   const handleWebSocketReconnect = useCallback(async () => {
+    resetGoalRevisions();
     if (!selectedProject || !selectedSession) return;
     await requestLatestMessages(selectedSession.id, isActive);
     statusCheckSentAtRef.current.set(selectedSession.id, Date.now());
@@ -391,7 +401,7 @@ function ChatInterface({
         ...getSubscriptionOptions(selectedSession.id),
       }],
     });
-  }, [getSubscriptionOptions, isActive, requestLatestMessages, selectedProject, selectedSession, sendMessage]);
+  }, [getSubscriptionOptions, isActive, requestLatestMessages, resetGoalRevisions, selectedProject, selectedSession, sendMessage]);
 
   useChatRealtimeHandlers({
     isActive,
@@ -417,6 +427,8 @@ function ChatInterface({
     sessionStore,
     onSteerOutcome: handleSteerOutcome,
     onCodexOperationReceipt: onOperationReceipt,
+    onCodexGoalState: onGoalState,
+    onCodexQueuedSend: handleCodexQueuedSend,
   });
 
   // Lets other modules (the quick settings Commands tab) hand text to the
@@ -641,15 +653,34 @@ function ChatInterface({
           handleGrantToolPermission={handleGrantToolPermission}
           activity={sessionActivity}
           sessionControls={provider === 'codex' && (
-            <CodexOperationFeedbackList
-              operations={operations.filter((entry) => entry.sessionId === (selectedSession?.id || currentSessionId))}
-              onDismiss={dismissOperation}
-              onCheckStatus={checkStatus}
-              isConnected={isConnected}
-            />
+            <>
+              {codexCommandNotice && (
+                <div role="status" className={`mx-auto mb-2 max-w-[54.25rem] rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs ${codexCommandNotice.isError ? 'text-destructive' : 'text-muted-foreground'}`}>
+                  {codexCommandNotice.content}
+                </div>
+              )}
+              {codexSessionId && <CodexGoalControls
+                goal={codexGoal}
+                operations={visibleCodexOperations}
+                isConnected={isConnected}
+                hasActiveTurn={Boolean(activeCodexTurnId)}
+                showDialogs={isActive}
+                onOperation={(operation, submittedDraft, editAfterQuery) => (
+                  dispatchOperation(codexSessionId, operation, undefined, submittedDraft, editAfterQuery)
+                )}
+                onDismiss={dismissOperation}
+              />}
+              <CodexOperationFeedbackList
+                operations={visibleCodexOperations}
+                onDismiss={dismissOperation}
+                onCheckStatus={checkStatus}
+                isConnected={isConnected}
+              />
+            </>
           )}
           isLoading={isProcessing}
           isCodexControlInput={isCodexControlInput}
+          hasActiveCodexGoal={hasActiveCodexGoal}
           onAbortSession={handleAbortSession}
           canAbortSession={canAbortSession}
           permissionMode={permissionMode}

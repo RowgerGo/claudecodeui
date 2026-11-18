@@ -89,6 +89,7 @@ type OperationReceipt = {
 const operationReceiptsBySession = new Map<string, Map<string, OperationReceipt>>();
 const codexGoalStates = new Map<string, ChatGoalStateEvent>();
 let goalRevision = Date.now();
+const codexSendReceipts = new Map<string, { status: 'pending' | 'sent' | 'queued' }>();
 
 function sendControlEvent(
   connection: RealtimeClientConnection,
@@ -520,7 +521,41 @@ export const chatRunRegistry = {
     const sessions = codexSubscriptions.get(connection) ?? new Set<string>();
     sessions.add(appSessionId);
     codexSubscriptions.set(connection, sessions);
+    const run = runs.get(appSessionId);
+    if (run?.provider === 'codex' && run.status === 'running') run.writer.updateWebSocket(connection);
   },
+
+  /**
+   * Deduplicates direct retries while native admission or queue fallback is
+   * unsettled, and retains the outcome through the normal reconnect window.
+   */
+  reserveCodexSend(appSessionId: string, messageId: string): {
+    prior?: 'pending' | 'sent' | 'queued';
+    finish(status?: 'sent' | 'queued'): void;
+  } {
+    const key = JSON.stringify([appSessionId, messageId]);
+    const prior = codexSendReceipts.get(key);
+    if (prior) return { prior: prior.status, finish: () => {} };
+    const receipt: { status: 'pending' | 'sent' | 'queued' } = { status: 'pending' };
+    codexSendReceipts.set(key, receipt);
+    return {
+      finish(status) {
+        if (receipt.status !== 'pending' || codexSendReceipts.get(key) !== receipt) return;
+        if (!status) {
+          codexSendReceipts.delete(key);
+          return;
+        }
+        receipt.status = status;
+        const timer = setTimeout(() => {
+          if (codexSendReceipts.get(key) === receipt) codexSendReceipts.delete(key);
+        }, COMPLETED_RUN_RETENTION_MS);
+        timer.unref?.();
+      },
+    };
+  },
+
+  /** Rechecks persisted queued work after a provider operation leaves the session idle. */
+  notifySessionMayBeIdle: notifyRunSettled,
 
   /** Publishes a native read or mutation result unless a live update already superseded it. */
   finishCodexGoalSnapshot: finishOperationSnapshot,
@@ -529,7 +564,6 @@ export const chatRunRegistry = {
   createCodexHooks(input: {
     appSessionId: string;
     userId: string | number | null;
-    connection?: RealtimeClientConnection;
     onAccepted?: () => void;
   }): CodexControlHooks {
     const { appSessionId } = input;
@@ -560,7 +594,7 @@ export const chatRunRegistry = {
           provider: 'codex',
           providerSessionId: threadId,
           turnId,
-          connection: input.connection ?? null,
+          connection: null,
           userId: input.userId,
         })?.writer ?? null;
       },
@@ -718,5 +752,6 @@ export const chatRunRegistry = {
     codexSubscriptions.clear();
     operationReceiptsBySession.clear();
     codexGoalStates.clear();
+    codexSendReceipts.clear();
   },
 };

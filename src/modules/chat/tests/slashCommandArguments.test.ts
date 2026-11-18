@@ -51,15 +51,16 @@ const EXISTING_SESSION: ProjectSession = { id: 'session-existing' };
 const renderComposer = ({
   provider = 'claude' as LLMProvider,
   isLoading = false,
+  hasActiveCodexGoal = false,
   session = EXISTING_SESSION as ProjectSession | null,
   onCodexOperation = vi.fn(),
 } = {}) => {
   const sent: Array<{ type: string; content?: string }> = [];
-  const view = renderHook(() =>
+  const view = renderHook(({ selectedSession }: { selectedSession: ProjectSession | null }) =>
     useChatComposerState({
       selectedProject: PROJECT,
-      selectedSession: session,
-      currentSessionId: session?.id ?? null,
+      selectedSession,
+      currentSessionId: selectedSession?.id ?? null,
       provider,
       permissionMode: 'default',
       cyclePermissionMode: () => undefined,
@@ -67,6 +68,7 @@ const renderComposer = ({
       currentProviderModel: 'test-model',
       currentProviderEffort: 'medium',
       isLoading,
+      hasActiveCodexGoal,
       activeCodexTurnId: isLoading ? 'native-turn' : undefined,
       codexSteerByDefault: true,
       supportsSteering: true,
@@ -79,7 +81,7 @@ const renderComposer = ({
       addMessage: () => undefined,
       setIsUserScrolledUp: () => undefined,
       setPendingPermissionRequests: () => undefined,
-    }));
+    }), { initialProps: { selectedSession: session } });
   return { view, sent, onCodexOperation, chatSends: () => sent.filter((message) => message.type === 'chat.send') };
 };
 
@@ -243,7 +245,7 @@ test('/goalkeeper is an ordinary message and other providers keep their custom /
   assert.equal(custom.onCodexOperation.mock.calls.length, 0);
 });
 
-test('a blank Codex chat allocates a session for a new goal only', async () => {
+test('a blank Codex chat allocates a session for a new goal only and moves its draft files', async () => {
   const { view, sent, onCodexOperation } = renderComposer({ provider: 'codex', session: null });
   const submit = async (input: string) => {
     await act(async () => { view.result.current.setInput(input); });
@@ -257,10 +259,37 @@ test('a blank Codex chat allocates a session for a new goal only', async () => {
   assert.equal(sessionRequests().length, 0);
   assert.equal(onCodexOperation.mock.calls.length, 0);
 
+  const attachment = new File(['draft'], 'original.txt');
+  await act(async () => { view.result.current.setAttachedFiles([attachment]); });
   await submit('/goal a new goal');
   assert.equal(sessionRequests().length, 1);
   assert.deepEqual(onCodexOperation.mock.calls[0].slice(0, 2), ['session-new', { type: 'chat.goal', action: 'set', objective: 'a new goal' }]);
   assert.deepEqual(sent, []);
+
+  await act(async () => { view.rerender({ selectedSession: { id: 'session-new' } }); });
+  assert.equal(view.result.current.input, '/goal a new goal');
+  assert.deepEqual(view.result.current.attachedFiles, [attachment]);
+  await act(async () => { view.rerender({ selectedSession: { id: 'session-other' } }); });
+  assert.deepEqual(view.result.current.attachedFiles, []);
+  await act(async () => { view.rerender({ selectedSession: { id: 'session-new' } }); });
+  assert.equal(view.result.current.input, '/goal a new goal');
+  assert.deepEqual(view.result.current.attachedFiles, [attachment]);
+});
+
+test('ordinary input stays queued in the gap between active goal turns', async () => {
+  const { view, sent, onCodexOperation } = renderComposer({ provider: 'codex', hasActiveCodexGoal: true });
+  const respond = fetchMock.getMockImplementation()!;
+  fetchMock.mockImplementation((url, init) => {
+    if (String(url) === '/api/user/drafts/queued-message' && init?.method === 'POST') {
+      return Promise.resolve(jsonResponse({ queuedMessage: JSON.parse(String(init.body)).queuedMessage, appended: false }));
+    }
+    return respond(url, init);
+  });
+  await act(async () => { view.result.current.setInput('the next user turn'); });
+  await act(async () => { await view.result.current.handleSubmit({ preventDefault: () => undefined } as never); });
+  assert.deepEqual(sent, []);
+  assert.equal(onCodexOperation.mock.calls.length, 0);
+  assert.equal(view.result.current.queuedDraft?.content, 'the next user turn');
 });
 
 for (const [opening, expandedBody] of [

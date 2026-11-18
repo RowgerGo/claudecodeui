@@ -99,8 +99,9 @@ export function createProviderRuntimeService(
       return (command, options, writer) => run(provider, command, options, writer);
     },
 
-    async abort(providerName: LLMProvider, sessionId: string): Promise<boolean> {
-      return Boolean(await dependencies.resolveProvider(providerName).runtime.abort(sessionId));
+    async abort(providerName: LLMProvider, sessionId: string, expectedTurnId?: string): Promise<boolean> {
+      const { runtime } = dependencies.resolveProvider(providerName);
+      return Boolean(await (expectedTurnId ? runtime.abort(sessionId, expectedTurnId) : runtime.abort(sessionId)));
     },
 
     async stopBackgroundTask(providerName: LLMProvider, sessionId: string, taskId: string): Promise<boolean> {

@@ -184,10 +184,10 @@ throws is answered with `INTERNAL_ERROR`.**
 
 | `type` | Payload | What the server does |
 | --- | --- | --- |
-| `chat.send` | `sessionId`, `content`, `options` | Resolves the session row, registers the run, dispatches to the provider runtime (`:146-158`). On a session whose previous turn left background work running, the new turn's CLI process supersedes the one that work runs under, so the work is stopped or finishes unheard; the composer asks the user before sending such a turn |
+| `chat.send` | `sessionId`, `content`, `options`, `messageId?` for a direct Codex send | Resolves the session row and dispatches a run to the provider. If an autonomous Codex turn takes the session first, the server can save the message to the session's persisted queue and returns `chat_send_queued`. On a session whose previous turn left background work running, the composer asks the user before superseding that work. |
 | `chat.edit-send` | as above plus `anchorId` | Announces `history_truncated`, rewinds or resumes the provider transcript at the anchor, then dispatches (`:314-408`) |
 | `chat.steer` | `sessionId`, `messageId` (a UUID), `content`, `options?`, `expectedTurnId` for Codex | Codex uses `turn/steer` on the observed turn and reports `chat_steer_status`. Claude writes to the CLI with priority `next` and acknowledges with `chat_steer_accepted`. The provider's user-message echo confirms delivery. |
-| `chat.abort` | `sessionId` | Aborts the runtime and emits the terminal `complete` on its behalf (`:415-438`) |
+| `chat.abort` | `sessionId`, `expectedTurnId?` for Codex | Aborts the named turn. The gateway checks a supplied Codex turn ID against the current one before calling `turn/interrupt`. |
 | `chat.stop-task` | `sessionId`, `taskId` | Stops one background task (agent, workflow or backgrounded command) through the provider runtime; the runtime reports the stop on the session's stream |
 | `chat.compact` | `sessionId`, `requestId` | Requests a manual context compaction for an idle Codex thread with history and no active goal. |
 | `chat.goal` | `sessionId`, `requestId`, `action`, `objective?`, `expectedGoal?`, `options?` | Queries or updates a persisted Codex goal. Actions are `get`, `set`, `edit`, `pause`, `resume`, `clear` and `replace`. The server checks the confirmed `expectedGoal` before replacement. |
@@ -303,6 +303,7 @@ Two kinds in those unions never appear where you would look for them:
 | `chat_steer_status` | Chat gateway and run registry | Reports Codex steering by message ID. `accepted` means the RPC succeeded, `delivered` confirms the user-message echo, `refused` allows queuing, `unread` restores the draft, and `unknown` keeps the message pending without resending. |
 | `chat_operation_status` | Chat gateway and run registry | Reports the progress or result of a specific `sessionId` and `requestId` without changing the chat turn's processing state. |
 | `chat_goal_state` | Chat gateway and run registry | Publishes a goal snapshot or cleared state by application session with a comparable `revision`, including between native turns. |
+| `chat_send_queued` | Chat gateway | Tells the sender the direct message is in the persisted queue after losing admission to a native operation. |
 | `protocol_error` | `chat-websocket.service.ts:127` | Error row, spinner cleared — except `STEER_UNAVAILABLE`, which only hands the named message back to the composer to queue, and the stop-task codes (`NO_SUCH_TASK`, `TASK_ID_REQUIRED`, `TASK_STOP_FAILED`), which leave the spinner alone since they are not about the run |
 | `chat_steer_accepted` | `chat-websocket.service.ts` (`handleChatSteer`) | Sent to the asking socket only: the steered message is in the turn; its card waits for the echo |
 | `session_upserted` | `session-upsert-broadcast.service.ts:81-105` | `useProjectsState` — sidebar rows and alias folding |

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { readDraftText, writeDraftText } from '@/shared/chatDrafts';
+import { createChatRequestId } from '@/shared/utils';
 import type {
   CodexChatOperation,
+  CodexChatOperationRequest,
   CodexGoalStateEvent,
   CodexOperationFeedback,
   CodexOperationReceipt,
@@ -50,8 +52,10 @@ export function useCodexChatOperations(sendMessage: (message: unknown) => boolea
   const [operations, setOperations] = useState(restorePendingOperations);
   // WebSocket callbacks can arrive back-to-back before React commits their state.
   const operationsRef = useRef(operations);
-  // The revision for a cleared goal still rejects a stale snapshot from the same session.
+  // Goal snapshots remain visible during reconnect until fresh state arrives.
   const [goalStates, setGoalStates] = useState(() => new Map<string, CodexGoalStateEvent>());
+  // Revisions only order events from the current WebSocket connection.
+  const goalRevisionsRef = useRef(new Map<string, number>());
 
   const updateOperations = useCallback((next: CodexOperationFeedback[]) => {
     operationsRef.current = next;
@@ -60,7 +64,8 @@ export function useCodexChatOperations(sendMessage: (message: unknown) => boolea
   }, []);
 
   const checkStatus = useCallback((sessionId: string, requestId: string) => {
-    sendMessage({ type: 'chat.operation.status', sessionId, requestId });
+    const message: CodexChatOperationRequest = { type: 'chat.operation.status', sessionId, requestId };
+    sendMessage(message);
   }, [sendMessage]);
 
   const dispatchOperation = useCallback((
@@ -71,19 +76,19 @@ export function useCodexChatOperations(sendMessage: (message: unknown) => boolea
     editAfterQuery?: boolean,
   ) => {
     const duplicate = operationsRef.current.find((entry) => entry.sessionId === sessionId && isUnresolved(entry)
-      && sameOperation(entry.request, request) && entry.editAfterQuery === editAfterQuery);
+      && sameOperation(entry.request, request) && Boolean(entry.editAfterQuery) === Boolean(editAfterQuery));
     if (duplicate) {
       if (isConnected) checkStatus(sessionId, duplicate.requestId);
       return;
     }
 
-    const requestId = crypto.randomUUID?.()
-      || Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16).padStart(8, '0')).join('');
+    const requestId = createChatRequestId();
     const operation = request.type === 'chat.compact' ? 'compact' : 'goal';
     const entry: CodexOperationFeedback = { sessionId, requestId, request, operation, status: 'pending', submittedDraft, editAfterQuery };
     updateOperations([...operationsRef.current, entry]);
     const requestOptions = request.type === 'chat.goal' && request.action === 'set' ? options : undefined;
-    if (!isConnected || sendMessage({ ...request, sessionId, requestId, ...(requestOptions ? { options: requestOptions } : {}) }) === false) {
+    const message: CodexChatOperationRequest = { ...request, sessionId, requestId, ...(requestOptions ? { options: requestOptions } : {}) };
+    if (!isConnected || sendMessage(message) === false) {
       updateOperations(operationsRef.current.map((item) => item.requestId === requestId
         ? { ...item, status: 'rejected', code: 'DISCONNECTED' } : item));
     }
@@ -110,13 +115,18 @@ export function useCodexChatOperations(sendMessage: (message: unknown) => boolea
   }, [updateOperations]);
 
   const onGoalState = useCallback((event: CodexGoalStateEvent) => {
+    const previousRevision = goalRevisionsRef.current.get(event.sessionId);
+    if (previousRevision !== undefined && previousRevision >= event.revision) return;
+    goalRevisionsRef.current.set(event.sessionId, event.revision);
     setGoalStates((current) => {
-      const previous = current.get(event.sessionId);
-      if (previous && previous.revision >= event.revision) return current;
       const next = new Map(current);
       next.set(event.sessionId, event);
       return next;
     });
+  }, []);
+
+  const resetGoalRevisions = useCallback(() => {
+    goalRevisionsRef.current.clear();
   }, []);
 
   useEffect(() => {
@@ -135,5 +145,5 @@ export function useCodexChatOperations(sendMessage: (message: unknown) => boolea
     return () => window.clearInterval(timer);
   }, [checkStatus, isConnected, updateOperations]);
 
-  return { operations, goalStates, dispatchOperation, onOperationReceipt, onGoalState, getPendingOperationIds, dismissOperation, checkStatus };
+  return { operations, goalStates, dispatchOperation, onOperationReceipt, onGoalState, resetGoalRevisions, getPendingOperationIds, dismissOperation, checkStatus };
 }

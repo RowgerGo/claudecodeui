@@ -1,8 +1,22 @@
 import { useEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 
-import type { ServerEvent,MarkSessionIdle,MarkSessionProcessing,PendingPermissionRequest,ProjectSession,LLMProvider,NormalizedMessage,GetSessionActivity,MarkSessionBackground,SideQuestionEvent,SteerOutcome } from '@/shared/types';
-import type { CodexGoalStateEvent, CodexOperationReceipt } from '@/shared/types';
+import type {
+  CodexGoalStateEvent,
+  CodexOperationReceipt,
+  CodexQueuedSendEvent,
+  GetSessionActivity,
+  LLMProvider,
+  MarkSessionBackground,
+  MarkSessionIdle,
+  MarkSessionProcessing,
+  NormalizedMessage,
+  PendingPermissionRequest,
+  ProjectSession,
+  ServerEvent,
+  SideQuestionEvent,
+  SteerOutcome,
+} from '@/shared/types';
 import { showCompletionTitleIndicator } from '@/modules/chat/utils/pageTitleNotification';
 import { playChatCompletionSound, playNotificationSound } from '@/shared/utils';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
@@ -57,6 +71,7 @@ type UseChatRealtimeHandlersArgs = {
   onSteerOutcome?: (sessionId: string, messageId: string, outcome: SteerOutcome) => void;
   onCodexOperationReceipt?: (event: CodexOperationReceipt) => void;
   onCodexGoalState?: (event: CodexGoalStateEvent) => void;
+  onCodexQueuedSend?: (sessionId: string) => void;
 };
 
 /* ------------------------------------------------------------------ */
@@ -97,6 +112,7 @@ export function useChatRealtimeHandlers({
   onSteerOutcome,
   onCodexOperationReceipt,
   onCodexGoalState,
+  onCodexQueuedSend,
 }: UseChatRealtimeHandlersArgs) {
   // Session switches can send `chat.subscribe` before this effect has a chance
   // to rebind the websocket listener. Read the visible session id from a ref
@@ -254,6 +270,21 @@ export function useChatRealtimeHandlers({
             onCodexGoalState?.(msg as CodexGoalStateEvent);
           }
           return;
+
+        case 'chat_send_queued': {
+          if (!msg.sessionId) return;
+          const event = msg as CodexQueuedSendEvent;
+          if (event.messageId) sessionStore.removeOptimisticSend(event.sessionId, event.messageId);
+          if (event.turnId) {
+            observeTurn(event.sessionId, event.turnId);
+            onSessionProcessing?.(event.sessionId);
+          } else if (event.turnId === null) {
+            onCodexTurnChange?.(event.sessionId, null);
+            onSessionIdle?.(event.sessionId);
+          }
+          onCodexQueuedSend?.(event.sessionId);
+          return;
+        }
 
         case 'protocol_error': {
           // A message sent into a turn that had already ended. The run is not
@@ -571,5 +602,6 @@ export function useChatRealtimeHandlers({
     onSteerOutcome,
     onCodexOperationReceipt,
     onCodexGoalState,
+    onCodexQueuedSend,
   ]);
 }

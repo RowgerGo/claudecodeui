@@ -13,7 +13,13 @@ type Props = {
 /** Used by ChatInterface to show Codex command receipts beside the composer. */
 export function CodexOperationFeedbackList({ operations, isConnected, onDismiss, onCheckStatus }: Props) {
   const { t } = useTranslation('chat');
-  const visible = operations.filter((entry) => !(entry.operation === 'compact' && entry.status === 'completed')).slice(-3);
+  const unresolved = operations.filter(({ status }) => status === 'pending' || status === 'accepted' || status === 'unknown');
+  const settled = operations.filter(({ status, operation }) => (
+    status === 'failed' || status === 'rejected' || (status === 'completed' && operation === 'goal')
+  ));
+  // Completed compact operations already have a transcript row. Unknown
+  // operations stay available for lookup even after newer commands settle.
+  const visible = [...unresolved, ...settled.slice(-3)];
   if (!visible.length) return null;
 
   return (
@@ -36,7 +42,7 @@ export function CodexOperationFeedbackList({ operations, isConnected, onDismiss,
 
         return (
           <div key={requestId} className="flex items-start gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs">
-            <span className="shrink-0 font-medium">{t(operation === 'compact' ? 'commands.compactLabel' : 'commands.goalLabel')}</span>
+            <span className="shrink-0 font-medium">{t(operation === 'compact' ? 'commands.compactLabel' : 'commands.goalCommand')}</span>
             <span className={`min-w-0 flex-1 break-words ${failed ? 'text-destructive' : 'text-muted-foreground'}`}>{message}</span>
             {status === 'unknown' && (
               <button

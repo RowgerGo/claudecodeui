@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { api } from '@/shared/api';
@@ -32,6 +32,8 @@ type UseProjectSlashCommandsResult = {
   isLoading: boolean;
   error: boolean;
 };
+
+const NO_COMMANDS: SlashCommand[] = [];
 
 const dedupeProviderSkills = (skills: ProviderSkill[]): ProviderSkill[] => {
   const seenCommands = new Set<string>();
@@ -80,9 +82,10 @@ export function useProjectSlashCommands(
   { enabled = true }: UseProjectSlashCommandsOptions = {},
 ): UseProjectSlashCommandsResult {
   const { t } = useTranslation();
+  const scope = selectedProject ? `${provider}:${selectedProject.projectId}` : null;
   // The fetched list, kept in state because it arrives asynchronously after
-  // the project or provider changes and every consumer derives its view from it.
-  const [commands, setCommands] = useState<SlashCommand[]>([]);
+  // the project or provider changes. Its scope prevents stale built-ins during a switch.
+  const [loaded, setLoaded] = useState<{ scope: string | null; commands: SlashCommand[] }>({ scope: null, commands: NO_COMMANDS });
   // Distinguishes "no commands yet" from "no commands at all" so a list can
   // show a loading state instead of an empty one while the request is in flight.
   const [isLoading, setIsLoading] = useState(false);
@@ -99,7 +102,7 @@ export function useProjectSlashCommands(
 
     const fetchCommands = async () => {
       if (!selectedProject) {
-        setCommands([]);
+        setLoaded({ scope: null, commands: NO_COMMANDS });
         setIsLoading(false);
         setError(false);
         return;
@@ -126,9 +129,6 @@ export function useProjectSlashCommands(
         const allCommands: SlashCommand[] = [
           ...((data.builtIn || []) as SlashCommand[]).map((command) => ({
             ...command,
-            description: command.descriptionKey
-              ? t(command.descriptionKey, { defaultValue: command.description })
-              : command.description,
             type: 'built-in',
           })),
           ...skillCommands,
@@ -139,13 +139,13 @@ export function useProjectSlashCommands(
         ];
 
         if (!cancelled) {
-          setCommands(allCommands);
+          setLoaded({ scope, commands: allCommands });
           setIsLoading(false);
         }
       } catch (fetchError) {
         console.error('Error fetching slash commands:', fetchError);
         if (!cancelled) {
-          setCommands([]);
+          setLoaded({ scope, commands: NO_COMMANDS });
           setError(true);
           setIsLoading(false);
         }
@@ -156,7 +156,15 @@ export function useProjectSlashCommands(
     return () => {
       cancelled = true;
     };
-  }, [enabled, selectedProject, provider, t]);
+  }, [enabled, selectedProject, provider, scope]);
+
+  const commands = useMemo(() => {
+    if (loaded.scope !== scope) return NO_COMMANDS;
+    if (!loaded.commands.some((command) => command.descriptionKey)) return loaded.commands;
+    return loaded.commands.map((command) => command.descriptionKey
+      ? { ...command, description: t(command.descriptionKey, { defaultValue: command.description }) }
+      : command);
+  }, [loaded, scope, t]);
 
   return { commands, isLoading, error };
 }

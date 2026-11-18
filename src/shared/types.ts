@@ -303,6 +303,13 @@ export type CodexGoalAction =
 /** Client operation before the transport assigns a request id. */
 export type CodexChatOperation = { type: 'chat.compact' } | ({ type: 'chat.goal' } & CodexGoalAction);
 
+/** A new control command or a lookup-only request for its existing receipt. */
+export type CodexChatOperationRequest = (CodexChatOperation | { type: 'chat.operation.status' }) & {
+  sessionId: string;
+  requestId: string;
+  options?: QueuedSendOptions;
+};
+
 /** Separate receipts for command admission and execution, correlated with the original request. */
 export type CodexOperationReceipt = {
   kind: 'chat_operation_status';
@@ -323,6 +330,15 @@ export type CodexGoalStateEvent = {
   sessionId: string;
   goal: CodexThreadGoal | null;
   revision: number;
+  timestamp: string;
+};
+
+/** Receipt when a Codex send met a continuation first and was persisted in the queue. */
+export type CodexQueuedSendEvent = {
+  kind: 'chat_send_queued';
+  sessionId: string;
+  messageId?: string;
+  turnId?: string | null;
   timestamp: string;
 };
 
@@ -428,6 +444,8 @@ export type SubagentInfo = {
 /** One rendered entry in a chat transcript — user turn, assistant turn, tool call and result, local command output, or subagent container — and the shape the chat message list and message components consume. */
 export type ChatMessage = {
   type: string;
+  /** Correlates a direct Codex optimistic user message with a queue transfer receipt. */
+  optimisticMessageId?: string;
   content?: string;
   displayText?: string;
   timestamp: string | number | Date;

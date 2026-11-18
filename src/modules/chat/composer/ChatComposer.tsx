@@ -61,6 +61,7 @@ type ChatComposerProps = {
   sessionControls?: ReactNode;
   isLoading: boolean;
   isCodexControlInput?: boolean;
+  hasActiveCodexGoal?: boolean;
   onAbortSession: () => void;
   /** Whether the viewed session can currently be interrupted; threaded to the send menu's Stop row, which otherwise looks actionable while `onAbortSession` already no-ops. Defaults to true so existing callers and tests, which never had a non-interruptible turn, keep working. */
   canAbortSession?: boolean;
@@ -154,6 +155,7 @@ export default function ChatComposer({
   sessionControls,
   isLoading,
   isCodexControlInput = false,
+  hasActiveCodexGoal = false,
   onAbortSession,
   canAbortSession = true,
   permissionMode,
@@ -292,7 +294,7 @@ export default function ChatComposer({
 
   const hasQueuedDraft = Boolean(queuedDraft);
   const hasAnyInput = Boolean(input.trim() || attachedFiles.length > 0);
-  const canQueueDraft = isLoading && hasAnyInput && !isCodexControlInput;
+  const canQueueDraft = (isLoading || hasActiveCodexGoal) && hasAnyInput && !isCodexControlInput;
   const canSteerInput = supportsSteering && (!isCodex || !input.trimStart().startsWith('/'));
   const submitHint = canQueueDraft
     ? isCodex && canSteerInput && codexSteerByDefault
@@ -548,7 +550,7 @@ export default function ChatComposer({
 
           <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2">
             <ScheduleMessagePopover
-              disabled={!input.trim()}
+              disabled={!input.trim() || isCodexControlInput}
               onSchedule={onScheduleMessage}
             />
 

@@ -43,7 +43,7 @@ export interface IProviderRuntime {
     writer: ProviderRuntimeWriter,
     context: ProviderRuntimeContext,
   ): Promise<unknown>;
-  abort(sessionId: string): boolean | Promise<boolean>;
+  abort(sessionId: string, expectedTurnId?: string): boolean | Promise<boolean>;
   permissions?: ProviderRuntimePermissionGateway;
   /**
    * Sessions with background tasks still outstanding, whether or not their
