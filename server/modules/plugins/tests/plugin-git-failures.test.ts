@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 import express from 'express';
@@ -274,6 +275,55 @@ test('the install route answers a git failure with its code and message instead 
     assert.match(body.error.message, /^Could not install the plugin: the git host could not be reached/);
     assert.match(body.error.details.gitOutput, /Failed to connect to 127\.0\.0\.1/);
   });
+});
+
+test('the install route tracks the requested plugin branch instead of the repository default', { timeout: 30_000 }, async () => {
+  const repository = await mkdtemp(path.join(fixtureHome, 'branch-demo-'));
+  const url = 'https://git.example.test/acme/branch-demo.git';
+  const installed = path.join(getPluginsDir(), 'branch-demo');
+  const git = (...args: string[]) => execFileAsync('git', ['-C', repository, ...args]);
+
+  await git('init', '-q', '-b', 'main');
+  await writeFile(path.join(repository, 'manifest.json'), JSON.stringify({
+    name: 'branch-demo', displayName: 'Branch Demo', entry: 'index.js',
+  }));
+  await writeFile(path.join(repository, 'index.js'), 'export const version = "main";\n');
+  await git('add', '.');
+  await git('-c', 'user.name=Plugin Test', '-c', 'user.email=plugin@example.test', 'commit', '-qm', 'main');
+  await git('switch', '-qc', 'custom');
+  await writeFile(path.join(repository, 'index.js'), 'export const version = "custom";\n');
+  await git('add', 'index.js');
+  await git('-c', 'user.name=Plugin Test', '-c', 'user.email=plugin@example.test', 'commit', '-qm', 'custom');
+  await git('switch', '-q', 'main');
+  // Resolve the route's HTTPS URL to a local repo so this test never calls a real host.
+  await execFileAsync('git', ['config', '--file', gitConfigPath, `url.${pathToFileURL(repository).href}.insteadOf`, url]);
+
+  try {
+    const app = express();
+    app.use(express.json());
+    app.use('/api/plugins', pluginsRoutes);
+    app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      res.status(error instanceof AppError ? error.statusCode : 500).json({ code: error instanceof AppError ? error.code : 'INTERNAL_ERROR' });
+    });
+
+    await withServer(app, async (baseUrl) => {
+      const install = (branch: string) => fetch(`${baseUrl}/api/plugins/install`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, branch }),
+      });
+      const invalid = await install('--upload-pack=/bin/false');
+      assert.equal(invalid.status, 400);
+      assert.deepEqual(await invalid.json(), { code: 'INVALID_PLUGIN_BRANCH' });
+
+      const response = await install('custom');
+      assert.equal(response.status, 200, await response.text());
+      assert.equal(fs.readFileSync(path.join(installed, 'index.js'), 'utf8'), 'export const version = "custom";\n');
+      const tracking = await execFileAsync('git', ['-C', installed, 'rev-parse', '--abbrev-ref', '@{upstream}']);
+      assert.equal(tracking.stdout.trim(), 'origin/custom');
+    });
+  } finally {
+    await writeFile(gitConfigPath, '');
+    fs.rmSync(installed, { recursive: true, force: true });
+  }
 });
 
 // git's stderr as measured with git 2.43 against GitHub, over HTTPS and SSH.

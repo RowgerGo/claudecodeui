@@ -5,6 +5,8 @@ import os from 'os';
 
 import { spawn } from 'cross-spawn';
 
+import { AppError } from '@/shared/utils.js';
+
 import {
   createPluginGitError, createPluginGitSpawnError, getPluginGitSpawnOptions, stopPluginGitOnServerExit,
 } from './plugin-git.service.js';
@@ -253,7 +255,8 @@ export function resolvePluginAssetPath(name, assetPath) {
   return realResolved;
 }
 
-export function installPluginFromGit(url) {
+/** Clones a plugin for the Plugins service and optionally tracks an explicit branch for updates. */
+export function installPluginFromGit(url: string, branch?: string) {
   return new Promise((resolve, reject) => {
     if (typeof url !== 'string' || !url.trim()) {
       return reject(new Error('Invalid URL: must be a non-empty string'));
@@ -299,7 +302,8 @@ export function installPluginFromGit(url) {
       resolve(manifest);
     };
 
-    const gitProcess = spawn('git', ['clone', '--depth', '1', '--', url, tempDir], {
+    const cloneArgs = ['clone', '--depth', '1', ...(branch === undefined ? [] : [`--branch=${branch}`]), '--', url, tempDir];
+    const gitProcess = spawn('git', cloneArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
       ...getPluginGitSpawnOptions(),
     });
@@ -317,6 +321,21 @@ export function installPluginFromGit(url) {
         const error = createPluginGitError('install', code, stderr);
         console.error(`[Plugins] git clone failed (exit code ${code}, ${error.code}):\n${error.details.gitOutput}`);
         return reject(error);
+      }
+
+      // Git accepts a tag in --branch, but the installed checkout must support git pull.
+      if (branch !== undefined) {
+        try {
+          const head = fs.readFileSync(path.join(tempDir, '.git', 'HEAD'), 'utf-8').trim();
+          if (head !== `ref: refs/heads/${branch}`) {
+            throw new AppError('The requested plugin ref is not a branch', {
+              code: 'INVALID_PLUGIN_BRANCH', statusCode: 400,
+            });
+          }
+        } catch (error) {
+          cleanupTemp();
+          return reject(error);
+        }
       }
 
       // Validate manifest exists

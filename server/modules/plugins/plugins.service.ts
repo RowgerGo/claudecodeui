@@ -18,7 +18,7 @@ type PluginDependencies = {
   resolveAsset(pluginName: string, assetPath: string): string | null;
   assetIsFile(assetPath: string): boolean;
   contentType(assetPath: string): string;
-  install(url: string): Promise<unknown>;
+  install(url: string, branch?: string): Promise<unknown>;
   update(pluginName: string): Promise<unknown>;
   uninstall(pluginName: string): Promise<unknown>;
   startServer(pluginName: string, pluginDirectory: string, serverConfig: unknown): Promise<number>;
@@ -104,12 +104,16 @@ export function createPluginsService(dependencies: PluginDependencies) {
       }
       return { success: true, name: pluginName, enabled };
     },
-    async install(urlInput: unknown) {
+    async install(urlInput: unknown, branch?: unknown) {
       const url = typeof urlInput === 'string' ? urlInput.trim() : '';
       if (!url || (!url.startsWith('https://') && !url.startsWith('git@'))) {
         throw new AppError('URL must start with https:// or git@', { code: 'INVALID_PLUGIN_URL', statusCode: 400 });
       }
-      const plugin = normalizePluginManifest(await dependencies.install(url));
+      if (branch !== undefined && (typeof branch !== 'string' || !branch || branch.length > 255
+        || branch.startsWith('-') || /[^a-zA-Z0-9_./-]/.test(branch))) {
+        throw new AppError('Invalid plugin branch name', { code: 'INVALID_PLUGIN_BRANCH', statusCode: 400 });
+      }
+      const plugin = normalizePluginManifest(await dependencies.install(url, branch));
       await startServerIfAvailable(plugin);
       return { success: true, plugin };
     },

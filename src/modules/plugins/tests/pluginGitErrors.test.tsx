@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 
 import '@/modules/i18n';
 import { PluginsProvider, usePlugins } from '@/modules/plugins/context/PluginsContext';
@@ -40,16 +40,15 @@ const installedPlugin: Plugin = {
 // `api.plugins.*` calls the global fetch, so stubbing it drives the real
 // PluginsProvider and settings tab without module mocks.
 function stubPluginsApi(replies: Record<string, StubbedReply>) {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (url: string) => {
-      const reply = replies[url] ?? { status: 404, body: { error: 'Not found' } };
-      return new Response(JSON.stringify(reply.body), {
-        status: reply.status,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }),
-  );
+  const fetchMock = vi.fn<typeof fetch>(async (url) => {
+    const reply = replies[String(url)] ?? { status: 404, body: { error: 'Not found' } };
+    return new Response(JSON.stringify(reply.body), {
+      status: reply.status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
 }
 
 function renderPluginSettings() {
@@ -59,6 +58,55 @@ function renderPluginSettings() {
     </PluginsProvider>,
   );
 }
+
+describe('Settings > Plugins installs the Codex Usage fork from its custom branch', () => {
+  const codexUsageFork = 'https://github.com/RowgerGo/cloudcli-plugin-codex-usage';
+
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubInstall() {
+    return stubPluginsApi({
+      '/api/plugins': { status: 200, body: { plugins: [] } },
+      '/api/plugins/install': { status: 200, body: { success: true } },
+    });
+  }
+
+  it('selects the custom branch from the recommendation while linking to the repository', async () => {
+    const fetchMock = stubInstall();
+    renderPluginSettings();
+
+    const card = within(await screen.findByRole('group', { name: 'Codex Usage' }));
+    expect(card.getByRole('link').getAttribute('href')).toBe(codexUsageFork);
+    fireEvent.click(card.getByRole('button', { name: 'Install' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/plugins/install', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ url: codexUsageFork, branch: 'custom' }),
+    })));
+  });
+
+  it.each([
+    [codexUsageFork, { url: codexUsageFork, branch: 'custom' }],
+    [`${codexUsageFork}.git/`, { url: codexUsageFork, branch: 'custom' }],
+    ['https://github.com/acme/example-plugin', { url: 'https://github.com/acme/example-plugin' }],
+  ])('resolves the branch when installing %s by URL', async (url, request) => {
+    const fetchMock = stubInstall();
+    renderPluginSettings();
+
+    const input = await screen.findByLabelText('Plugin git repository URL');
+    fireEvent.change(input, { target: { value: url } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/plugins/install', expect.objectContaining({
+      method: 'POST', body: JSON.stringify(request),
+    })));
+  });
+});
 
 describe('Settings > Plugins shows why a git install or update failed', () => {
   beforeEach(() => {

@@ -34,7 +34,7 @@ export function createPluginsRouter(service: ReturnType<typeof createPluginsServ
     } catch (error) { next(error); }
   });
   router.put('/:name/enable', respond((req) => service.setEnabled(routeParameter(req.params.name), req.body?.enabled)));
-  router.post('/install', respond((req) => service.install(req.body?.url)));
+  router.post('/install', respond((req) => service.install(req.body?.url, req.body?.branch)));
   router.post('/:name/update', respond((req) => service.update(routeParameter(req.params.name))));
   router.all('/:name/rpc/*', async (req, res, next) => {
     try {

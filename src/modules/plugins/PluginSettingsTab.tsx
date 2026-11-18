@@ -41,6 +41,7 @@ type PluginRecommendation = {
   id: string;
   translationKey: string;
   repoUrl: string;
+  branch?: string;
   installedNames: string[];
   icon: LucideIcon;
   source: 'official' | 'unofficial';
@@ -126,6 +127,8 @@ const UNOFFICIAL_PLUGIN_RECOMMENDATIONS: PluginRecommendation[] = [
     id: 'codex-usage',
     translationKey: 'codexUsagePlugin',
     repoUrl: CODEX_USAGE_PLUGIN_URL,
+    // The fork publishes its local plugin changes on this branch.
+    branch: 'custom',
     installedNames: ['codex-usage'],
     icon: BarChart3,
     source: 'unofficial',
@@ -153,7 +156,7 @@ function repoSlug(repoUrl: string) {
 }
 
 function normalizeRepoUrl(repoUrl: string | null) {
-  return repoUrl?.replace(/\.git$/, '').replace(/\/$/, '').toLowerCase() ?? null;
+  return repoUrl?.toLowerCase().replace(/\/+$/, '').replace(/\.git$/, '') ?? null;
 }
 
 function pluginMatchesRecommendation(plugin: Plugin, recommendation: PluginRecommendation) {
@@ -404,13 +407,14 @@ function PluginRecommendationCard({
 }) {
   const { t } = useTranslation('settings');
   const Icon = recommendation.icon;
+  const name = t(`pluginSettings.${recommendation.translationKey}.name`);
   const isOfficial = recommendation.source === 'official';
   const accentClass = isOfficial ? 'bg-blue-500/30' : 'bg-amber-500/40';
   const hoverClass = isOfficial ? 'hover:border-blue-400 dark:hover:border-blue-500' : 'hover:border-amber-400 dark:hover:border-amber-500';
   const iconClass = isOfficial ? 'text-blue-500' : 'text-amber-500';
 
   return (
-    <div className={`relative flex overflow-hidden rounded-lg border border-dashed border-border bg-card transition-all duration-200 ${hoverClass}`}>
+    <div role="group" aria-label={name} className={`relative flex overflow-hidden rounded-lg border border-dashed border-border bg-card transition-all duration-200 ${hoverClass}`}>
       <div className={`w-[3px] flex-shrink-0 ${accentClass}`} />
       <div className="min-w-0 flex-1 p-4">
         <div className="flex items-start justify-between gap-3">
@@ -421,7 +425,7 @@ function PluginRecommendationCard({
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-semibold leading-none text-foreground">
-                  {t(`pluginSettings.${recommendation.translationKey}.name`)}
+                  {name}
                 </span>
                 <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
                   {t('pluginSettings.tab')}
@@ -485,10 +489,15 @@ export default function PluginSettingsTab() {
   };
 
   const handleInstall = async () => {
-    if (!gitUrl.trim()) return;
+    const url = gitUrl.trim();
+    if (!url) return;
+    const normalizedUrl = normalizeRepoUrl(url);
+    const recommendation = [...OFFICIAL_PLUGIN_RECOMMENDATIONS, ...UNOFFICIAL_PLUGIN_RECOMMENDATIONS].find(
+      (entry) => entry.branch && normalizeRepoUrl(entry.repoUrl) === normalizedUrl,
+    );
     setInstalling(true);
     setInstallError(null);
-    const result = await installPlugin(gitUrl.trim());
+    const result = await installPlugin(recommendation?.repoUrl ?? url, recommendation?.branch);
     if (result.success) {
       setGitUrl('');
     } else {
@@ -502,7 +511,7 @@ export default function PluginSettingsTab() {
     setInstallingRecommendation(recommendation.id);
     setInstallError(null);
     try {
-      const result = await installPlugin(recommendation.repoUrl);
+      const result = await installPlugin(recommendation.repoUrl, recommendation.branch);
       if (!result.success) {
         setInstallError(result.error || t('pluginSettings.installFailed'));
       }

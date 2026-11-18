@@ -597,7 +597,7 @@ export const api = {
 
   plugins: {
     list: () => get('/api/plugins'),
-    install: (url: string) => post('/api/plugins/install', { url }),
+    install: (url: string, branch?: string) => post('/api/plugins/install', { url, branch }),
     uninstall: (name: string) => del(`/api/plugins/${encodeURIComponent(name)}`),
     update: (name: string) => post(`/api/plugins/${encodeURIComponent(name)}/update`),
     toggle: (name: string, enabled: boolean) =>

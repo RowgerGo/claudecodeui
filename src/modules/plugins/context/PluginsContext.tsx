@@ -10,7 +10,7 @@ type PluginsContextValue = {
   loading: boolean;
   pluginsError: string | null;
   refreshPlugins: () => Promise<void>;
-  installPlugin: (url: string) => Promise<{ success: boolean; error?: string }>;
+  installPlugin: (url: string, branch?: string) => Promise<{ success: boolean; error?: string }>;
   uninstallPlugin: (name: string) => Promise<{ success: boolean; error?: string }>;
   updatePlugin: (name: string) => Promise<{ success: boolean; error?: string }>;
   togglePlugin: (name: string, enabled: boolean) => Promise<{ success: boolean; error: string | null }>;
@@ -62,9 +62,9 @@ export function PluginsProvider({ children }: { children: ReactNode }) {
     void refreshPlugins();
   }, [refreshPlugins]);
 
-  const installPlugin = useCallback(async (url: string) => {
+  const installPlugin = useCallback(async (url: string, branch?: string) => {
     try {
-      const res = await api.plugins.install(url);
+      const res = await api.plugins.install(url, branch);
       const data = await res.json();
       if (res.ok) {
         await refreshPlugins();
