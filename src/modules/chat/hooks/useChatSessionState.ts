@@ -108,7 +108,7 @@ type UseChatSessionStateArgs = {
   /** Highest live seq observed per session; sent as `lastSeq` on subscribe. */
   lastSeqRef: MutableRefObject<Map<string, number>>;
   /** Codex turn cursor and pending steer IDs for the current subscription. */
-  getSubscriptionOptions?: (sessionId: string) => { lastTurnId?: string; pendingSteerIds?: string[] };
+  getSubscriptionOptions?: (sessionId: string) => { lastTurnId?: string; pendingSteerIds?: string[]; pendingOperationIds?: string[] };
   sessionStore: SessionStore;
 };
 

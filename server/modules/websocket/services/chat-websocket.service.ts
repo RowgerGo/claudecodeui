@@ -12,6 +12,12 @@ import {
   sideQuestionsService,
 } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
+import {
+  handleCodexControl,
+  replayCodexOperationStatuses,
+  sendCodexOperationStatus,
+  subscribeCodexGoal,
+} from '@/modules/websocket/services/codex-control-websocket.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import {
   getGlobalImageAssetsDir,
@@ -22,6 +28,9 @@ import {
 import type {
   AnyRecord,
   AuthenticatedWebSocketRequest,
+  ChatCodexOperation,
+  CodexControlHooks,
+  CodexControlResult,
   LLMProvider,
   ProviderPermissionDecision,
   ProviderRuntimeWriter,
@@ -29,7 +38,7 @@ import type {
   SideQuestionEvent,
   SideQuestionRuntime,
 } from '@/shared/types.js';
-import { parseIncomingJsonObject, SIDE_QUESTION_ID_PATTERN } from '@/shared/utils.js';
+import { AppError, parseIncomingJsonObject, SIDE_QUESTION_ID_PATTERN } from '@/shared/utils.js';
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -86,6 +95,15 @@ export type ProviderRuntimeGateway = SideQuestionRuntime & {
   stopBackgroundTask(provider: LLMProvider, sessionId: string, taskId: string): Promise<boolean>;
   /** Delivers a message into the session's running turn; false when no turn can take it. */
   steer(provider: LLMProvider, sessionId: string, command: string, options: AnyRecord): Promise<boolean>;
+  /** Codex-specific session controls, provided by the central runtime service. */
+  controlCodex?(
+    sessionId: string,
+    options: AnyRecord,
+    operation: ChatCodexOperation,
+    hooks: CodexControlHooks,
+  ): Promise<CodexControlResult>;
+  /** True while a pending native Codex operation owns the next turn. */
+  isCodexControlBlockingTurn?(sessionId: string): boolean;
   /** Whether a provider runtime still holds background work for the session after its turn ended. */
   hasBackgroundWork(sessionId: string): boolean;
   resolveToolApproval(requestId: string, payload: ProviderPermissionDecision): void;
@@ -180,6 +198,13 @@ type ResolvedSendTarget = {
   provider: LLMProvider;
 };
 
+type ChatDispatchResult = {
+  started: boolean;
+  error: string | null;
+  /** Native admission refused before sending. A claimed queued message can be restored. */
+  retry?: boolean;
+};
+
 /**
  * Shared front half of `chat.send` and `chat.edit-send`: the session row and
  * provider come from the database, never from the client.
@@ -247,10 +272,11 @@ async function dispatchRun(
   dependencies: ChatWebSocketDependencies,
   extraRuntimeOptions: AnyRecord = {},
   beforeRun?: (run: NonNullable<ReturnType<typeof chatRunRegistry.startRun>>) => void | Promise<void>,
-): Promise<{ started: boolean; error: string | null }> {
+): Promise<ChatDispatchResult> {
   const provider = session.provider as LLMProvider;
 
-  const run = chatRunRegistry.startRun({
+  const controlBlocking = provider === 'codex' && dependencies.runtime.isCodexControlBlockingTurn?.(sessionId);
+  const run = controlBlocking ? null : chatRunRegistry.startRun({
     appSessionId: sessionId,
     provider,
     providerSessionId: session.provider_session_id,
@@ -267,7 +293,7 @@ async function dispatchRun(
         sessionId
       );
     }
-    return { started: false, error: 'A run is already in progress for this session.' };
+    return { started: false, error: 'A run was already in progress for this session.', retry: true };
   }
 
   const clientOptions = (data.options ?? {}) as AnyRecord;
@@ -302,6 +328,9 @@ async function dispatchRun(
     sessionId,
     cwd: clientOptions.cwd ?? session.project_path ?? undefined,
     projectPath: session.project_path ?? clientOptions.projectPath,
+    ...(provider === 'codex'
+      ? { codexHooks: chatRunRegistry.createCodexHooks({ appSessionId: sessionId, userId }) }
+      : {}),
   };
 
   let failure: string | null = null;
@@ -310,10 +339,14 @@ async function dispatchRun(
     // conversation here and a rewind for a run that was never admitted cannot
     // be taken back. Inside the try so a rewind that throws still releases the
     // run instead of leaving the session processing forever.
-    await beforeRun?.(run);
+    if (beforeRun) await beforeRun(run);
     await dependencies.runtime.run(provider, command, runtimeOptions, run.writer);
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
+    if (provider === 'codex' && error instanceof AppError && error.code === 'CODEX_TURN_BUSY') {
+      if (ws) sendProtocolError(ws, 'RUN_IN_PROGRESS', failure, sessionId);
+      return { started: false, error: 'A run was already in progress for this session.', retry: true };
+    }
     console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: failure });
   } finally {
     // Safety net: a runtime that crashed (or resolved) without emitting its
@@ -839,8 +872,12 @@ function handleChatSubscribe(
         sendJson(ws, event);
       }
     }
+    replayCodexOperationStatuses(ws, sessionId, (target as AnyRecord).pendingOperationIds);
   }
   chatRunRegistry.setCodexSubscriptions(ws, codexSessions);
+  for (const sessionId of codexSessions) {
+    subscribeCodexGoal(ws, sessionId, dependencies.runtime);
+  }
 }
 
 /**
@@ -870,7 +907,10 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
  * - `chat.steer`               { sessionId, messageId, content, expectedTurnId?, options? }
  * - `chat.abort`               { sessionId }
  * - `chat.stop-task`           { sessionId, taskId }
- * - `chat.subscribe`           { sessions: [{ sessionId, lastSeq?, lastTurnId?, pendingSteerIds? }] }
+ * - `chat.compact`             { sessionId, requestId }
+ * - `chat.goal`                { sessionId, requestId, action, objective?, expectedGoal?, options? }
+ * - `chat.operation.status`    { sessionId, requestId }
+ * - `chat.subscribe`           { sessions: [{ sessionId, lastSeq?, lastTurnId?, pendingSteerIds?, pendingOperationIds? }] }
  * - `chat.permission-response` { requestId, allow, updatedInput?, message?, rememberEntry? }
  *
  * Outbound protocol (server to client): every frame is `kind`-based — either
@@ -905,7 +945,7 @@ export async function runDetachedChatTurn(
     interruptActiveRun?: boolean;
   },
   dependencies: ChatWebSocketDependencies,
-): Promise<{ started: boolean; error: string | null }> {
+): Promise<ChatDispatchResult> {
   const session = sessionsDb.getSessionById(input.sessionId);
   if (!session) {
     return { started: false, error: 'The session no longer exists.' };
@@ -919,7 +959,7 @@ export async function runDetachedChatTurn(
   const activeRun = chatRunRegistry.getRun(input.sessionId);
   if (activeRun && activeRun.status === 'running') {
     if (!input.interruptActiveRun) {
-      return { started: false, error: 'A run was already in progress for this session.' };
+      return { started: false, error: 'A run was already in progress for this session.', retry: true };
     }
     // Same shape as `chat.abort`: cancel the provider run and emit the
     // terminal `complete` on its behalf, so every watching client sees the
@@ -975,6 +1015,15 @@ export function handleChatConnection(
           return;
         case 'chat.steer':
           await handleChatSteer(ws, data, dependencies);
+          return;
+        case 'chat.compact':
+          await handleCodexControl(ws, userId, data, dependencies.runtime, 'compact');
+          return;
+        case 'chat.goal':
+          await handleCodexControl(ws, userId, data, dependencies.runtime, 'goal');
+          return;
+        case 'chat.operation.status':
+          sendCodexOperationStatus(ws, data.sessionId, data.requestId);
           return;
         case 'chat.abort':
           await handleChatAbort(ws, data, dependencies);

@@ -58,7 +58,9 @@ type ChatComposerProps = {
   ) => void;
   handleGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
   activity: SessionActivity | null;
+  sessionControls?: ReactNode;
   isLoading: boolean;
+  isCodexControlInput?: boolean;
   onAbortSession: () => void;
   /** Whether the viewed session can currently be interrupted; threaded to the send menu's Stop row, which otherwise looks actionable while `onAbortSession` already no-ops. Defaults to true so existing callers and tests, which never had a non-interruptible turn, keep working. */
   canAbortSession?: boolean;
@@ -149,7 +151,9 @@ export default function ChatComposer({
   handlePermissionDecision,
   handleGrantToolPermission,
   activity,
+  sessionControls,
   isLoading,
+  isCodexControlInput = false,
   onAbortSession,
   canAbortSession = true,
   permissionMode,
@@ -288,7 +292,7 @@ export default function ChatComposer({
 
   const hasQueuedDraft = Boolean(queuedDraft);
   const hasAnyInput = Boolean(input.trim() || attachedFiles.length > 0);
-  const canQueueDraft = isLoading && hasAnyInput;
+  const canQueueDraft = isLoading && hasAnyInput && !isCodexControlInput;
   const canSteerInput = supportsSteering && (!isCodex || !input.trimStart().startsWith('/'));
   const submitHint = canQueueDraft
     ? isCodex && canSteerInput && codexSteerByDefault
@@ -322,6 +326,8 @@ export default function ChatComposer({
           />
         </div>
       )}
+
+      {sessionControls}
 
       <ScheduledMessageList
         scheduledMessages={scheduledMessages}
@@ -420,7 +426,7 @@ export default function ChatComposer({
 
         <PromptInput
           onSubmit={onSubmit as (event: FormEvent<HTMLFormElement>) => void}
-          status={isLoading ? 'streaming' : 'ready'}
+          status={isLoading && !isCodexControlInput ? 'streaming' : 'ready'}
           className={[
             isTextareaExpanded ? 'chat-input-expanded' : '',
             hasActivityIndicator ? 'rounded-t-none' : '',
@@ -563,7 +569,7 @@ export default function ChatComposer({
               providerLabel={providerLabel}
             />
 
-            {(isLoading || activity?.background) && hasAnyInput && !isRecording && !isTranscribing ? (
+            {(isLoading || activity?.background) && hasAnyInput && !isCodexControlInput && !isRecording && !isTranscribing ? (
               // The caret-trigger menu only replaces the plain button when there is
               // something to send: an empty composer during a turn keeps the
               // one-tap ■ Stop below, and an empty composer during background
@@ -591,7 +597,7 @@ export default function ChatComposer({
                 onClick={
                   isTranscribing
                     ? undefined
-                    : isLoading && !isRecording
+                    : isLoading && !isRecording && !isCodexControlInput
                       ? onAbortSession
                       : isRecording
                         ? (e: MouseEvent<HTMLButtonElement>) => {
@@ -606,7 +612,7 @@ export default function ChatComposer({
                   // `onAbortSession` and end an unrelated in-flight turn.
                   isTranscribing
                     ? true
-                    : isLoading
+                    : isLoading && !isCodexControlInput
                       // With an empty composer this button is the one-tap Stop
                       // (see `onClick` above), so it disables on `canAbortSession`
                       // exactly like the send menu's Stop row does. Recording

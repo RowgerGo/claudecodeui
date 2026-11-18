@@ -278,6 +278,62 @@ export type ServerEvent = {
   [key: string]: unknown;
 };
 
+// ---------------------------
+
+//----------------- CODEX CHAT CONTROL ------------
+
+/** Snapshot of the app server's persistent thread goal, in its native units. */
+export type CodexThreadGoal = {
+  threadId: string;
+  objective: string;
+  status: 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** Parameters for a Codex goal operation, including the snapshot being edited or replaced. */
+export type CodexGoalAction =
+  | { action: 'get' | 'pause' | 'resume' | 'clear' }
+  | { action: 'set'; objective: string }
+  | { action: 'edit' | 'replace'; objective: string; expectedGoal: CodexThreadGoal };
+
+/** Client operation before the transport assigns a request id. */
+export type CodexChatOperation = { type: 'chat.compact' } | ({ type: 'chat.goal' } & CodexGoalAction);
+
+/** Separate receipts for command admission and execution, correlated with the original request. */
+export type CodexOperationReceipt = {
+  kind: 'chat_operation_status';
+  sessionId: string;
+  requestId: string;
+  operation?: 'compact' | 'goal';
+  status: 'pending' | 'accepted' | 'rejected' | 'completed' | 'failed' | 'unknown';
+  code?: string;
+  error?: string;
+  goal?: CodexThreadGoal | null;
+  cleared?: boolean;
+  goalRevision?: number;
+};
+
+/** Authoritative goal update or subscription snapshot, scoped by session and revision. */
+export type CodexGoalStateEvent = {
+  kind: 'chat_goal_state';
+  sessionId: string;
+  goal: CodexThreadGoal | null;
+  revision: number;
+  timestamp: string;
+};
+
+/** This tab's operation receipt and the composer text it can retire after success. */
+export type CodexOperationFeedback = Omit<CodexOperationReceipt, 'kind' | 'operation'> & {
+  operation: 'compact' | 'goal';
+  request: CodexChatOperation;
+  submittedDraft?: string;
+  editAfterQuery?: boolean;
+};
+
 
 // ---------------------------
 
@@ -813,6 +869,7 @@ export type HelpCommandData = {
   commands?: Array<{
     name: string;
     description?: string;
+    descriptionKey?: string;
     namespace?: string;
   }>;
 };
@@ -887,6 +944,7 @@ export type ComposerMenuAnchor = {
 export type SlashCommand = {
   name: string;
   description?: string;
+  descriptionKey?: string;
   namespace?: string;
   path?: string;
   type?: 'built-in' | 'custom' | 'skill' | string;

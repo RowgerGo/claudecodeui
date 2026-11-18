@@ -5,6 +5,9 @@ import { sessionsService } from '@/modules/providers/services/sessions.service.j
 import type { IProvider } from '@/shared/interfaces.js';
 import type {
   AnyRecord,
+  ChatCodexOperation,
+  CodexControlHooks,
+  CodexControlResult,
   LLMProvider,
   ProviderPermissionDecision,
   ProviderRunFunction,
@@ -110,6 +113,21 @@ export function createProviderRuntimeService(
       // A runtime that cannot write into a running turn has nothing to steer.
       const { runtime } = dependencies.resolveProvider(providerName);
       return Boolean(await runtime.steer?.(sessionId, command, options));
+    },
+
+    async controlCodex(
+      sessionId: string,
+      options: AnyRecord,
+      operation: ChatCodexOperation,
+      hooks: CodexControlHooks,
+    ): Promise<CodexControlResult> {
+      const provider = dependencies.resolveProvider('codex');
+      return provider.runtime.controlCodex?.(sessionId, options, operation, hooks, createRuntimeContext(provider))
+        ?? { status: 'rejected', code: 'UNSUPPORTED_PROVIDER' };
+    },
+
+    isCodexControlBlockingTurn(sessionId: string): boolean {
+      return dependencies.resolveProvider('codex').runtime.isCodexControlBlockingTurn?.(sessionId) ?? false;
     },
 
     hasBackgroundWork(sessionId: string): boolean {

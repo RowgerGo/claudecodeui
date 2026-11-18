@@ -244,6 +244,8 @@ export type MessageKind =
 export type GatewayEventKind =
   | 'chat_subscribed'
   | 'chat_steer_accepted'
+  | 'chat_operation_status'
+  | 'chat_goal_state'
   | 'session_upserted'
   | 'loading_progress'
   | 'protocol_error'
@@ -267,6 +269,87 @@ export type ServerEventKind = MessageKind | GatewayEventKind;
  * and an unknown result must never trigger another send.
  */
 export type ChatSteerOutcome = 'accepted' | 'delivered' | 'refused' | 'unread' | 'unknown';
+
+// ---------------------------
+//----------------- CODEX SESSION CONTROL TYPES ------------
+/** All statuses returned by the Codex App Server for a persisted thread goal. */
+export type CodexGoalStatus = 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
+
+/**
+ * Codex-native thread goal snapshot used by the provider and chat gateway.
+ * The thread and creation time help validate edits and confirmed replacements.
+ */
+export type CodexGoal = {
+  threadId: string;
+  objective: string;
+  status: CodexGoalStatus;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/**
+ * Validated chat control operation, independent of the transport request id.
+ * Replacement always requires the goal snapshot the user confirmed.
+ */
+export type ChatCodexOperation =
+  | { kind: 'compact' }
+  | { kind: 'goal'; action: 'get' | 'pause' | 'resume' | 'clear' }
+  | { kind: 'goal'; action: 'set'; objective: string }
+  | { kind: 'goal'; action: 'edit'; objective: string; expectedGoal?: CodexGoal }
+  | { kind: 'goal'; action: 'replace'; objective: string; expectedGoal: CodexGoal };
+
+/**
+ * Actual outcome of a runtime operation. A rejection precedes a native
+ * mutation. A failed operation can include the reread goal after a partial
+ * replacement. Goal null denotes an explicitly confirmed missing goal.
+ */
+export type CodexControlResult =
+  | { status: 'completed'; goal?: CodexGoal | null; cleared?: boolean }
+  | { status: 'rejected' | 'failed'; code: string; error?: string; goal?: CodexGoal | null };
+
+/**
+ * Chat gateway receipt scoped to the issuing app session and request.
+ * Unknown means the process cannot confirm an outcome, so clients reconcile
+ * state through a lookup and avoid repeating a mutation.
+ */
+export type ChatOperationStatusEvent = {
+  kind: 'chat_operation_status';
+  sessionId: string;
+  requestId: string;
+  operation?: ChatCodexOperation['kind'];
+  timestamp: string;
+  goalRevision?: number;
+} & (CodexControlResult | { status: 'pending' | 'accepted' | 'unknown' });
+
+/**
+ * Authoritative chat gateway goal state. Revisions order native live updates
+ * and subscription snapshots for one app session, even outside a turn.
+ */
+export type ChatGoalStateEvent = {
+  kind: 'chat_goal_state';
+  sessionId: string;
+  goal: CodexGoal | null;
+  revision: number;
+  timestamp: string;
+};
+
+/**
+ * Gateway callbacks retained by a live Codex thread across multiple native
+ * turns. Hooks are scoped to its stable app session. Acceptance is specific
+ * to the current control request and follows the native RPC acknowledgement.
+ */
+export type CodexControlHooks = {
+  bindThread(threadId: string): void;
+  discardUnmaterializedThread?(threadId: string): void;
+  isTurnRunning(): boolean;
+  startTurn(threadId: string, turnId: string): ProviderRuntimeWriter | null;
+  publishGoal(goal: CodexGoal | null): void;
+  onAccepted(): void;
+  onIdle(): void;
+};
 
 // ---------------------------
 //----------------- SIDE QUESTION TYPES ------------
@@ -475,6 +558,13 @@ export type ClearedContextSegment = {
  */
 export type CompactionInfo = {
   phase: 'running' | 'done' | 'failed';
+  /** Native Codex compaction item and enclosing turn, shared by live and rollout rows. */
+  nativeItemId?: string;
+  nativeTurnId?: string;
+  /** Zero-based boundary within a turn, used when an older record has no item ID. */
+  boundaryIndex?: number;
+  /** Summary text explicitly provided by the provider. */
+  summary?: string;
   /** Whether the user asked for it or the context window did. */
   trigger?: 'manual' | 'auto';
   /** Tokens the conversation held before and after, when the boundary reports them. */

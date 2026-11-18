@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, test, vi } from 'vitest';
 
+import '@/modules/i18n';
 import type { Project } from '@/shared/types';
 
 /**
@@ -73,7 +74,7 @@ test('assembles built-in, deduped skills and custom commands in that order', asy
     skillName: 'review',
   });
   assert.equal(result.current.error, false);
-  assert.deepEqual(listCommands.mock.calls[0], ['/work/triage-repo']);
+  assert.deepEqual(listCommands.mock.calls[0], ['/work/triage-repo', 'claude']);
   assert.deepEqual(listSkills.mock.calls[0], ['claude', { workspacePath: '/work/triage-repo' }]);
 });
 

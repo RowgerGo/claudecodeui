@@ -329,13 +329,17 @@ export function useSlashCommands({
       }
 
       if (event.key === 'Tab' || event.key === 'Enter') {
-        event.preventDefault();
+        if (event.key === 'Enter' && event.shiftKey) return false;
+        // The menu filter is debounced. On a quick submit an old suggestion
+        // must not turn an unrecognized name into a different command.
+        const cursorPosition = textareaRef.current?.selectionStart ?? input.length;
+        const liveQuery = slashPosition >= 0 ? input.slice(slashPosition + 1, cursorPosition) : commandQuery;
+        const targetCommands = liveQuery === commandQuery ? filteredCommands : filterSlashCommands(slashCommands, liveQuery);
         // Until the user arrows through the menu nothing is highlighted, so both
         // keys act on the first match — the entry the menu renders at the top.
-        const targetCommand = filteredCommands[selectedCommandIndex >= 0 ? selectedCommandIndex : 0];
-        if (!targetCommand) {
-          return true;
-        }
+        const targetCommand = targetCommands[liveQuery === commandQuery && selectedCommandIndex >= 0 ? selectedCommandIndex : 0];
+        if (!targetCommand) return false;
+        event.preventDefault();
 
         // Tab is completion, not submission: it only writes "<name> " into the
         // input and closes the menu, so an argument can still be typed before
@@ -359,10 +363,15 @@ export function useSlashCommands({
     [
       showCommandMenu,
       filteredCommands,
+      commandQuery,
+      input,
       insertCommandIntoInput,
       resetCommandMenuState,
       selectCommandFromKeyboard,
       selectedCommandIndex,
+      slashCommands,
+      slashPosition,
+      textareaRef,
     ],
   );
 

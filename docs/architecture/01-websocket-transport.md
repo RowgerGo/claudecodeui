@@ -13,8 +13,7 @@ serves the app, and it decides what a connection is by looking at the pathname �
 no second server and no socket.io-style namespacing. Every path authenticates once, at the
 HTTP upgrade, before any handler runs. The path that matters is `/ws`, the chat socket: a
 browser tab opens exactly one, and every feature that needs live data subscribes to that
-one socket rather than opening its own. The protocol on it is deliberately small — six
-inbound message types, every outbound frame tagged with a `kind` — so the client needs one
+one socket rather than opening its own. Every outbound chat frame carries a `kind`, so the client needs one
 switch statement and no provider-specific branching. The server trusts the client for the
 session id and the prompt text and nothing else: provider, project path and the
 provider-native session id are all read out of the database from that session id. And a
@@ -179,7 +178,7 @@ Master frames pass it by.
 
 ## The chat protocol going up
 
-**RULE: six `type` values, dispatched by one switch (`chat-websocket.service.ts:676-698`).
+**One switch in `chat-websocket.service.ts` dispatches incoming frames by `type`.
 Anything else is answered with `protocol_error` / `UNKNOWN_MESSAGE_TYPE`; anything that
 throws is answered with `INTERNAL_ERROR`.**
 
@@ -190,10 +189,13 @@ throws is answered with `INTERNAL_ERROR`.**
 | `chat.steer` | `sessionId`, `messageId` (a UUID), `content`, `options?`, `expectedTurnId` for Codex | Codex uses `turn/steer` on the observed turn and reports `chat_steer_status`. Claude writes to the CLI with priority `next` and acknowledges with `chat_steer_accepted`. The provider's user-message echo confirms delivery. |
 | `chat.abort` | `sessionId` | Aborts the runtime and emits the terminal `complete` on its behalf (`:415-438`) |
 | `chat.stop-task` | `sessionId`, `taskId` | Stops one background task (agent, workflow or backgrounded command) through the provider runtime; the runtime reports the stop on the session's stream |
-| `chat.subscribe` | `sessions: [{ sessionId, lastSeq, lastTurnId?, pendingSteerIds? }]` | Acknowledges with `chat_subscribed`, attaches the socket and replays missed live events. For Codex, `lastSeq` applies to the matching `lastTurnId`. The acknowledgement returns the active turn ID and receipts for the requested steer IDs. |
+| `chat.compact` | `sessionId`, `requestId` | Requests a manual context compaction for an idle Codex thread with history and no active goal. |
+| `chat.goal` | `sessionId`, `requestId`, `action`, `objective?`, `expectedGoal?`, `options?` | Queries or updates a persisted Codex goal. Actions are `get`, `set`, `edit`, `pause`, `resume`, `clear` and `replace`. The server checks the confirmed `expectedGoal` before replacement. |
+| `chat.operation.status` | `sessionId`, `requestId` | Looks up a control receipt. The server returns `unknown` when it has no record. |
+| `chat.subscribe` | `sessions: [{ sessionId, lastSeq, lastTurnId?, pendingSteerIds?, pendingOperationIds? }]` | Acknowledges with `chat_subscribed`, attaches the socket and replays missed live events. For Codex, `lastSeq` applies to the matching `lastTurnId`. The acknowledgement returns the active turn ID and requested steer receipts. Codex goal snapshots and requested operation receipts follow as separate frames. |
 | `chat.permission-response` | `requestId`, `allow`, `updatedInput?`, `message?`, `rememberEntry?` | Resolves one pending tool approval (`:511-522`) |
 
-These are built in exactly three client files: the composer builds sends, aborts and
+The composer builds sends, controls, aborts and
 permission answers (`useChatComposerState.ts:825-837`, `:1121-1124`, `:1149-1156`),
 `chat.stop-task` is built by the background-tasks strip's ✕ (`BackgroundTasksStrip.tsx`), and
 `chat.subscribe` is built in `useChatSessionState.ts:668-674` and
@@ -299,15 +301,32 @@ Two kinds in those unions never appear where you would look for them:
 | `chat_subscribed` | `chat-websocket.service.ts` | Processing state, pending permissions, active Codex turn ID and requested steer receipts |
 | `turn_started` | Codex runtime | Records the native turn ID for steering and replay. |
 | `chat_steer_status` | Chat gateway and run registry | Reports Codex steering by message ID. `accepted` means the RPC succeeded, `delivered` confirms the user-message echo, `refused` allows queuing, `unread` restores the draft, and `unknown` keeps the message pending without resending. |
+| `chat_operation_status` | Chat gateway and run registry | Reports the progress or result of a specific `sessionId` and `requestId` without changing the chat turn's processing state. |
+| `chat_goal_state` | Chat gateway and run registry | Publishes a goal snapshot or cleared state by application session with a comparable `revision`, including between native turns. |
 | `protocol_error` | `chat-websocket.service.ts:127` | Error row, spinner cleared — except `STEER_UNAVAILABLE`, which only hands the named message back to the composer to queue, and the stop-task codes (`NO_SUCH_TASK`, `TASK_ID_REQUIRED`, `TASK_STOP_FAILED`), which leave the spinner alone since they are not about the run |
 | `chat_steer_accepted` | `chat-websocket.service.ts` (`handleChatSteer`) | Sent to the asking socket only: the steered message is in the turn; its card waits for the echo |
 | `session_upserted` | `session-upsert-broadcast.service.ts:81-105` | `useProjectsState` — sidebar rows and alias folding |
 | `loading_progress` | `projects-with-sessions-fetch.service.ts:164-175` | `useProjectsState` — project scan progress (`:720-736`) |
 | `scheduled_messages_changed` | `scheduled-messages.service.ts` (`announceScheduledMessagesChanged`), on schedule, cancel, claim and failure | `useScheduledMessages` — reads the open session's scheduled list again |
 
-An open Codex chat's subscription remains active across turns. A queued or scheduled
-turn started by the backend streams to those viewers as soon as the new turn starts.
-Closing the socket removes its subscription and leaves the running turn in place.
+An open Codex chat's subscription remains active across turns. Viewers receive each native
+turn with its own `turnId`, whether it starts from a queued message or a goal continuation.
+Closing the socket removes its subscription. The server's thread connection can continue
+to receive and settle turns while an active goal remains.
+
+### Control receipts and goal recovery
+
+The gateway reserves each `(sessionId, requestId)` before it calls the Codex runtime.
+A repeat receives the current receipt. `pending` covers validation and native admission,
+`accepted` means Codex acknowledged the operation, and `completed` records the actual
+result. A compaction can stay accepted until its matching native item and turn finish.
+Errors appear as `rejected` or `failed` on the receipt. After a CloudCLI restart an
+unrecorded request returns `unknown` on lookup, and the client preserves its pending state.
+
+Goal changes and snapshots carry the app session ID and a goal revision. The gateway
+compares the revision before and after each native read so an older response cannot
+overwrite an intervening change. On a CloudCLI restart, the first subscription reads the
+persisted goal from Codex. That read does not open a turn.
 
 ### The one exception
 

@@ -4,6 +4,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, it, vi } from 'vitest';
 import type { KeyboardEvent, RefObject } from 'react';
 
+import '@/modules/i18n';
 import type { Project, SlashCommand } from '@/shared/types';
 
 /**

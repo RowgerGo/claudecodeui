@@ -21,6 +21,7 @@ import { useScheduledMessages } from '@/modules/chat/composer/useScheduledMessag
 import { useChatSessionState } from '@/modules/chat/hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '@/modules/chat/hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
+import { useCodexChatOperations } from '@/modules/chat/hooks/useCodexChatOperations';
 import { useSessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { useEscapeToAbortSession } from '@/modules/chat/hooks/useEscapeToAbortSession';
 import {
@@ -29,6 +30,7 @@ import {
 } from '@/shared/context/SessionProtectionContext';
 import ChatMessagesPane from '@/modules/chat/transcript/ChatMessagesPane';
 import ChatComposer from '@/modules/chat/composer/ChatComposer';
+import { CodexOperationFeedbackList } from '@/modules/chat/composer/CodexOperationFeedbackList';
 import CommandResultModal from '@/modules/chat/modals/CommandResultModal';
 
 type ChatInterfaceProps = {
@@ -77,6 +79,8 @@ function ChatInterface({
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings();
   const { subscribe, isConnected } = useWebSocket();
   const { t } = useTranslation('chat');
+  const { operations, dispatchOperation, onOperationReceipt, getPendingOperationIds, dismissOperation, checkStatus } =
+    useCodexChatOperations(sendMessage, isConnected);
   const processingSessions = useProcessingSessions();
   const {
     markSessionProcessing: onSessionProcessing,
@@ -115,11 +119,13 @@ function ChatInterface({
   const getSubscriptionOptions = useCallback((sessionId: string) => {
     const lastTurnId = lastTurnIdRef.current.get(sessionId);
     const pendingSteerIds = getPendingSteerIdsRef.current?.(sessionId) ?? [];
+    const pendingOperationIds = getPendingOperationIds(sessionId);
     return {
       ...(lastTurnId ? { lastTurnId } : {}),
       ...(pendingSteerIds.length > 0 ? { pendingSteerIds } : {}),
+      ...(pendingOperationIds.length > 0 ? { pendingOperationIds } : {}),
     };
-  }, []);
+  }, [getPendingOperationIds]);
 
   const resetStreamingState = useCallback(() => {
     if (streamTimerRef.current) {
@@ -265,6 +271,7 @@ function ChatInterface({
   const canSteerCurrentTurn = supportsSteering && (provider !== 'codex' || Boolean(activeCodexTurnId));
   const {
     input,
+    isCodexControlInput,
     setInput,
     textareaRef,
     inputHighlightRef,
@@ -343,6 +350,7 @@ function ChatInterface({
     onFileOpen,
     onShowSettings,
     onClearContext: handleClearContext,
+    onCodexOperation: dispatchOperation,
     scrollToBottom,
     addMessage,
     setIsUserScrolledUp,
@@ -408,6 +416,7 @@ function ChatInterface({
     requestLatestMessages,
     sessionStore,
     onSteerOutcome: handleSteerOutcome,
+    onCodexOperationReceipt: onOperationReceipt,
   });
 
   // Lets other modules (the quick settings Commands tab) hand text to the
@@ -631,7 +640,16 @@ function ChatInterface({
           handlePermissionDecision={handlePermissionDecision}
           handleGrantToolPermission={handleGrantToolPermission}
           activity={sessionActivity}
+          sessionControls={provider === 'codex' && (
+            <CodexOperationFeedbackList
+              operations={operations.filter((entry) => entry.sessionId === (selectedSession?.id || currentSessionId))}
+              onDismiss={dismissOperation}
+              onCheckStatus={checkStatus}
+              isConnected={isConnected}
+            />
+          )}
           isLoading={isProcessing}
+          isCodexControlInput={isCodexControlInput}
           onAbortSession={handleAbortSession}
           canAbortSession={canAbortSession}
           permissionMode={permissionMode}

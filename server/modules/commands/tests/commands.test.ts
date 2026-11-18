@@ -38,14 +38,20 @@ function createModelsService(sessionModels: Record<string, string> = {}) {
   };
 }
 
-async function executeCommand(
-  commandName: string,
-  context: Record<string, unknown>,
+async function requestCommands(
+  endpoint: string,
+  body: Record<string, unknown>,
   sessionModels: Record<string, string> = {},
 ): Promise<Record<string, unknown>> {
   const router = createCommandsRouter({
     fileSystem: {
-      readFile: async () => JSON.stringify({ name: 'claude-code-ui', version: '0.0.0-test' }),
+      access: async () => {},
+      readdir: async (directory: string) => directory.startsWith('/home/test/')
+        ? [{ name: 'goal.md', isDirectory: () => false, isFile: () => true }]
+        : [],
+      readFile: async (filename: string) => filename.endsWith('goal.md')
+        ? 'Custom goal $ARGUMENTS'
+        : JSON.stringify({ name: 'claude-code-ui', version: '0.0.0-test' }),
     } as unknown as typeof import('node:fs/promises'),
     homeDirectory: () => '/home/test',
     appRoot: '/app',
@@ -61,9 +67,9 @@ async function executeCommand(
   await once(server, 'listening');
   try {
     const address = server.address() as AddressInfo;
-    const response = await fetch(`http://127.0.0.1:${address.port}/api/commands/execute`, {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/commands/${endpoint}`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ commandName, context }),
+      body: JSON.stringify(body),
     });
     assert.equal(response.status, 200);
     return await response.json() as Record<string, unknown>;
@@ -71,6 +77,40 @@ async function executeCommand(
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }
+
+function executeCommand(
+  commandName: string,
+  context: Record<string, unknown>,
+  sessionModels?: Record<string, string>,
+) {
+  return requestCommands('execute', { commandName, context }, sessionModels);
+}
+
+test('session commands appear in the Codex catalog and help only', async () => {
+  const codex = await requestCommands('list', { provider: 'codex' });
+  const claude = await requestCommands('list', {});
+  const compactAndGoal = ['/compact', '/goal'];
+  const sessionCommands = (entries: unknown) => (entries as Array<{ name: string }>)
+    .filter((entry) => compactAndGoal.includes(entry.name));
+
+  assert.deepEqual(sessionCommands(codex.builtIn).map((entry) => entry.name), compactAndGoal);
+  assert.deepEqual(sessionCommands(claude.builtIn), []);
+  assert.deepEqual(sessionCommands(claude.custom).map((entry) => entry.name), ['/goal']);
+
+  const help = await executeCommand('/help', { provider: 'codex' });
+  const helpData = help.data as { commands: unknown; content: string };
+  assert.deepEqual(sessionCommands(helpData.commands).map((entry) => entry.name), compactAndGoal);
+  assert.match(helpData.content, /### \/compact\n/);
+  assert.match(helpData.content, /### \/goal\n/);
+
+  const custom = await requestCommands('execute', {
+    commandName: '/goal',
+    commandPath: '/home/test/.claude/commands/goal.md',
+    rawArgs: 'some text',
+    context: { provider: 'claude' },
+  });
+  assert.equal(custom.content, 'Custom goal some text');
+});
 
 test('models command returns models only for the active provider using injected catalog', async () => {
   const result = await executeCommand('/models', { provider: 'codex' });

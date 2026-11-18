@@ -183,8 +183,9 @@ function HelpContent({ data }: { data: HelpCommandData }) {
                   </Badge>
                 </div>
                 <p className="mt-3 text-sm leading-5 text-muted-foreground">
-                  {command.description
-                    || (command.descriptionKey ? t(command.descriptionKey) : t('chat:misc.noDescription'))}
+                  {command.descriptionKey
+                    ? t(command.descriptionKey, { defaultValue: command.description })
+                    : command.description || t('chat:misc.noDescription')}
                 </p>
               </div>
             ))}

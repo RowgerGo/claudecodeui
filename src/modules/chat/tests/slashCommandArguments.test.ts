@@ -5,7 +5,8 @@ import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import '@/modules/i18n';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
-import type { PermissionMode, Project, SlashCommand } from '@/shared/types';
+import { resetChatDrafts } from '@/shared/chatDrafts';
+import type { LLMProvider, PermissionMode, Project, ProjectSession, SlashCommand } from '@/shared/types';
 
 /**
  * Regression guard for #1523: the composer cut a custom command's arguments at
@@ -32,6 +33,8 @@ const OTHER_COMMAND = {
   description: 'Another custom command',
 };
 
+const CUSTOM_GOAL_COMMAND = { ...OTHER_COMMAND, name: '/goal' };
+
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -43,30 +46,41 @@ const executeBodies = () => fetchMock.mock.calls
   .filter(([url]) => String(url) === '/api/commands/execute')
   .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>);
 
-const renderComposer = () => {
+const EXISTING_SESSION: ProjectSession = { id: 'session-existing' };
+
+const renderComposer = ({
+  provider = 'claude' as LLMProvider,
+  isLoading = false,
+  session = EXISTING_SESSION as ProjectSession | null,
+  onCodexOperation = vi.fn(),
+} = {}) => {
   const sent: Array<{ type: string; content?: string }> = [];
   const view = renderHook(() =>
     useChatComposerState({
       selectedProject: PROJECT,
-      selectedSession: { id: 'session-existing' },
-      currentSessionId: 'session-existing',
-      provider: 'claude',
+      selectedSession: session,
+      currentSessionId: session?.id ?? null,
+      provider,
       permissionMode: 'default',
       cyclePermissionMode: () => undefined,
       resolvePermissionModeForProvider: () => 'default' as PermissionMode,
       currentProviderModel: 'test-model',
       currentProviderEffort: 'medium',
-      isLoading: false,
+      isLoading,
+      activeCodexTurnId: isLoading ? 'native-turn' : undefined,
+      codexSteerByDefault: true,
+      supportsSteering: true,
       canAbortSession: false,
       tokenBudget: null,
       sendMessage: (message) => { sent.push(message as { type: string; content?: string }); },
+      onCodexOperation,
       onSessionEstablished: () => undefined,
       scrollToBottom: () => undefined,
       addMessage: () => undefined,
       setIsUserScrolledUp: () => undefined,
       setPendingPermissionRequests: () => undefined,
     }));
-  return { view, chatSends: () => sent.filter((message) => message.type === 'chat.send') };
+  return { view, sent, onCodexOperation, chatSends: () => sent.filter((message) => message.type === 'chat.send') };
 };
 
 const renderLoadedComposer = async () => {
@@ -92,10 +106,19 @@ beforeEach(() => {
   fetchMock = vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
     const target = String(url);
     if (target === '/api/commands/list' && init?.method === 'POST') {
+      if (JSON.parse(String(init.body)).provider === 'codex') {
+        return Promise.resolve(jsonResponse({ builtIn: [{ name: '/compact' }, { name: '/goal' }], custom: [] }));
+      }
+      if (JSON.parse(String(init.body)).provider === 'opencode') {
+        return Promise.resolve(jsonResponse({ builtIn: [], custom: [CUSTOM_GOAL_COMMAND] }));
+      }
       return Promise.resolve(jsonResponse({ builtIn: [], custom: [ECHO_COMMAND, OTHER_COMMAND], count: 2 }));
     }
-    if (target.startsWith('/api/providers/claude/skills')) {
+    if (target.includes('/skills')) {
       return Promise.resolve(jsonResponse({ success: true, data: { skills: [] } }));
+    }
+    if (target === '/api/providers/sessions' && init?.method === 'POST') {
+      return Promise.resolve(jsonResponse({ success: true, data: { sessionId: 'session-new' } }, 201));
     }
     if (target === '/api/commands/execute' && init?.method === 'POST') {
       return Promise.resolve(jsonResponse({ type: 'custom', command: '/echo', content: expandedContent, hasBashCommands: false }));
@@ -103,6 +126,7 @@ beforeEach(() => {
     return Promise.resolve(jsonResponse([]));
   });
   vi.stubGlobal('fetch', fetchMock);
+  resetChatDrafts();
   localStorage.clear();
 });
 
@@ -112,6 +136,7 @@ afterEach(async () => {
   expandedContent = 'expanded';
   await new Promise((resolve) => setTimeout(resolve, 50));
   vi.unstubAllGlobals();
+  resetChatDrafts();
   localStorage.clear();
 });
 
@@ -171,6 +196,71 @@ test('a menu pick over a composer that opens with the command trims its argument
 
   assert.equal(body.rawArgs, 'hi there');
   assert.deepEqual(body.args, ['hi', 'there']);
+});
+
+test('a running Codex turn routes /goal pause before queueing, steering, or normal sends', async () => {
+  const { view, sent, onCodexOperation } = renderComposer({ provider: 'codex', isLoading: true });
+  const attachment = new File(['draft'], 'draft.txt');
+  await act(async () => {
+    view.result.current.setInput('/goal pause');
+    view.result.current.setAttachedFiles([attachment]);
+  });
+  await act(async () => { await view.result.current.handleSubmit({ preventDefault: () => undefined } as never); });
+  assert.equal(onCodexOperation.mock.calls.length, 1);
+  assert.deepEqual(onCodexOperation.mock.calls[0].slice(0, 2), ['session-existing', { type: 'chat.goal', action: 'pause' }]);
+  assert.deepEqual(sent, []);
+  assert.equal(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/queued-message')).length, 0);
+  assert.equal(view.result.current.input, '/goal pause');
+  assert.deepEqual(view.result.current.attachedFiles, [attachment]);
+});
+
+test('the Codex command menu and direct input use the same handler and preserve a multiline objective', async () => {
+  const { view, sent, onCodexOperation } = renderComposer({ provider: 'codex' });
+  await waitFor(() => assert.equal(view.result.current.slashCommandsCount, 2));
+  const input = '/goal first line\n  second line\nthird line';
+  await act(async () => { view.result.current.setInput(input); });
+  await act(async () => { view.result.current.handleCommandSelect({ name: '/goal', type: 'built-in' }, 0, false); });
+  await act(async () => { await view.result.current.handleSubmit({ preventDefault: () => undefined } as never); });
+  const expected = ['session-existing', { type: 'chat.goal', action: 'set', objective: 'first line\n  second line\nthird line' }];
+  assert.deepEqual(onCodexOperation.mock.calls.map((call) => call.slice(0, 2)), [expected, expected]);
+  assert.deepEqual(sent, []);
+});
+
+test('/goalkeeper is an ordinary message and other providers keep their custom /goal', async () => {
+  const codex = renderComposer({ provider: 'codex' });
+  await act(async () => { codex.view.result.current.setInput('/goalkeeper'); });
+  await act(async () => { await codex.view.result.current.handleSubmit({ preventDefault: () => undefined } as never); });
+  assert.equal(codex.onCodexOperation.mock.calls.length, 0);
+  assert.equal(codex.chatSends()[0].content, '/goalkeeper');
+  codex.view.unmount();
+
+  const custom = renderComposer({ provider: 'opencode' });
+  await waitFor(() => assert.equal(custom.view.result.current.slashCommandsCount, 1));
+  await act(async () => { custom.view.result.current.setInput('/goal custom objective'); });
+  await act(async () => { await custom.view.result.current.handleSubmit({ preventDefault: () => undefined } as never); });
+  await waitFor(() => assert.equal(executeBodies().length, 1));
+  assert.equal(executeBodies()[0].commandPath, CUSTOM_GOAL_COMMAND.path);
+  assert.equal(custom.onCodexOperation.mock.calls.length, 0);
+});
+
+test('a blank Codex chat allocates a session for a new goal only', async () => {
+  const { view, sent, onCodexOperation } = renderComposer({ provider: 'codex', session: null });
+  const submit = async (input: string) => {
+    await act(async () => { view.result.current.setInput(input); });
+    await act(async () => { await view.result.current.handleSubmit({ preventDefault: () => undefined } as never); });
+  };
+  const sessionRequests = () => fetchMock.mock.calls.filter(([url]) => String(url) === '/api/providers/sessions');
+
+  await submit('/goal');
+  await submit('/compact');
+  await submit('/compact extra');
+  assert.equal(sessionRequests().length, 0);
+  assert.equal(onCodexOperation.mock.calls.length, 0);
+
+  await submit('/goal a new goal');
+  assert.equal(sessionRequests().length, 1);
+  assert.deepEqual(onCodexOperation.mock.calls[0].slice(0, 2), ['session-new', { type: 'chat.goal', action: 'set', objective: 'a new goal' }]);
+  assert.deepEqual(sent, []);
 });
 
 for (const [opening, expandedBody] of [

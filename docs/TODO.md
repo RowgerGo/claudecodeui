@@ -6,14 +6,14 @@
 
 ### 提交 1 · 接入 Codex 会话命令
 
-- [ ] **1.1 在命令菜单和输入框识别两个命令**
+- [x] **1.1 在命令菜单和输入框识别两个命令**
 
   1. 为命令列表请求增加可选的 `provider`，在 Codex 的聊天菜单、快捷设置命令列表和帮助中登记 `/compact` 和 `/goal`。复用两个界面已有的命令来源。涉及显示的命令说明、状态和错误文案走现有 i18n。 [命令注册](../server/modules/commands/commands.routes.ts) · [共享命令列表](../src/shared/hooks/useProjectSlashCommands.ts) · [前端 API](../src/shared/api.ts)
   2. 让菜单点击、键盘选中和直接输入共用同一个命令处理函数。直接输入按行首完整命令名匹配，在排队和轮内引导之前分发。保留 Tab 补全以及自定义命令展开时跳过再次解析的行为。 [命令菜单](../src/modules/chat/hooks/useSlashCommands.ts) · [输入提交](../src/modules/chat/hooks/useChatComposerState.ts)
 
   **验收条件**　Codex 的两个菜单都能找到新命令。直接发送多行目标保留原文，输入 `/goalkeeper` 仍按普通文本发送。普通轮运行时输入 `/goal pause` 进入命令处理函数一次，`chat.send`、`chat.steer` 和队列写入各为零。切换其他提供方可继续使用其已有的同名自定义命令。
 
-- [ ] **1.2 实现会话控制消息、独立回执和请求去重**
+- [x] **1.2 实现会话控制消息、独立回执和请求去重**
 
   1. 在聊天 WebSocket 增加 `chat.compact` 和 `chat.goal`。请求携带应用 `sessionId`、`requestId`，目标操作另带动作与对应参数。服务端从会话记录解析提供方、工作目录和原生线程 ID，校验参数后交给 Codex 运行时。把消息及回执类型加入前后端共享类型，并补充 WebSocket 协议文档。 [WebSocket 网关](../server/modules/websocket/services/chat-websocket.service.ts) · [后端类型](../server/shared/types.ts) · [前端类型](../src/shared/types.ts) · [传输协议](architecture/01-websocket-transport.md)
   2. 按会话和请求 ID 在第一次原生调用前登记操作。同一请求重发时返回进行中或已知结果。将请求受理、拒绝和实际执行结果分别回显，错误只更新对应操作。浏览器用原请求 ID 核对丢失的回执，服务重启后无法确认结果时保留「待确认」。 [运行注册表](../server/modules/websocket/services/chat-run-registry.service.ts) · [网页事件处理](../src/modules/chat/hooks/useChatRealtimeHandlers.ts)

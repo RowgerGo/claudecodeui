@@ -229,17 +229,42 @@ const builtInCommands = [
   },
 ];
 
+const codexSessionCommands = [
+  {
+    name: "/compact",
+    description: "Compact the context of the current Codex conversation",
+    descriptionKey: "chat:commands.codexCompact",
+    namespace: "builtin",
+    metadata: { type: "builtin" },
+  },
+  {
+    name: "/goal",
+    description: "View or manage the goal of the current Codex conversation",
+    descriptionKey: "chat:commands.codexGoal",
+    namespace: "builtin",
+    metadata: { type: "builtin" },
+  },
+];
+
+function listBuiltInCommands(provider: unknown) {
+  return readModelProvider(provider) === "codex"
+    ? [...builtInCommands, ...codexSessionCommands]
+    : builtInCommands;
+}
+
 /**
  * Built-in command handlers
  * Each handler returns { type: 'builtin', action: string, data: any }
  */
 const builtInHandlers = {
   "/help": async (args, context) => {
-    const helpText = `# Claude Code Commands
+    const provider = readModelProvider(context?.provider);
+    const commands = listBuiltInCommands(provider);
+    const helpText = `# ${provider === "codex" ? "Codex" : "Claude Code"} Commands
 
 ## Built-in Commands
 
-${builtInCommands
+${commands
   .map(
     (cmd) => `### ${cmd.name}
 ${cmd.description}
@@ -272,11 +297,7 @@ Custom commands can be created in:
       data: {
         content: helpText,
         format: "markdown",
-        commands: builtInCommands.map((command) => ({
-          name: command.name,
-          description: command.description,
-          namespace: command.namespace,
-        })),
+        commands: commands.map(({ metadata: _metadata, ...command }) => command),
       },
     };
   },
@@ -479,8 +500,9 @@ Custom commands can be created in:
  */
 router.post("/list", async (req, res) => {
   try {
-    const { projectPath } = req.body;
-    const allCommands = [...builtInCommands];
+    const { projectPath, provider } = req.body;
+    const builtIn = listBuiltInCommands(provider ?? req.query.provider);
+    const allCommands = [...builtIn];
 
     // Scan project-level commands (.claude/commands/)
     if (projectPath) {
@@ -512,7 +534,7 @@ router.post("/list", async (req, res) => {
     customCommands.sort((a, b) => a.name.localeCompare(b.name));
 
     res.json({
-      builtIn: builtInCommands,
+      builtIn,
       custom: customCommands,
       count: allCommands.length,
     });

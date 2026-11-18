@@ -1,7 +1,10 @@
 import type {
   AnyRecord,
   BackgroundTaskSummary,
+  ChatCodexOperation,
   CliVersionProbe,
+  CodexControlHooks,
+  CodexControlResult,
   FetchHistoryOptions,
   FetchHistoryResult,
   LLMProvider,
@@ -76,6 +79,16 @@ export interface IProviderRuntime {
    * the gateway to offer queueing. A transport error leaves delivery unknown.
    */
   steer?(sessionId: string, command: string, options: AnyRecord): Promise<boolean>;
+  /** Runs a validated Codex session control operation through the provider's thread connection. */
+  controlCodex?(
+    sessionId: string,
+    options: AnyRecord,
+    operation: ChatCodexOperation,
+    hooks: CodexControlHooks,
+    context: ProviderRuntimeContext,
+  ): Promise<CodexControlResult>;
+  /** True while Codex is reserving the session for a control operation or native continuation. */
+  isCodexControlBlockingTurn?(sessionId: string): boolean;
 }
 
 /**

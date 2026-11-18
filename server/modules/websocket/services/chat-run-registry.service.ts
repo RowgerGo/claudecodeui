@@ -1,8 +1,15 @@
 import { sessionsDb } from '@/modules/database/index.js';
 import { ChatSessionWriter } from '@/modules/websocket/services/chat-session-writer.service.js';
 import { broadcastSessionUpserted } from '@/modules/websocket/services/session-upsert-broadcast.service.js';
+import { WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import type {
+  ChatCodexOperation,
+  ChatGoalStateEvent,
+  ChatOperationStatusEvent,
   ChatSteerOutcome,
+  CodexControlHooks,
+  CodexControlResult,
+  CodexGoal,
   LLMProvider,
   NormalizedMessage,
   RealtimeClientConnection,
@@ -71,6 +78,49 @@ const runs = new Map<string, ChatRun>();
 // A chat view subscribed while idle also needs the next Codex turn's stream
 // when the queue dispatcher starts the turn without a browser socket.
 const codexSubscriptions = new Map<RealtimeClientConnection, Set<string>>();
+
+type OperationReceipt = {
+  event: ChatOperationStatusEvent;
+  listeners: Set<RealtimeClientConnection>;
+};
+
+// Keep receipts for the lifetime of the server so retransmission cannot
+// repeat a native write even after its run has left the replay cache.
+const operationReceiptsBySession = new Map<string, Map<string, OperationReceipt>>();
+const codexGoalStates = new Map<string, ChatGoalStateEvent>();
+let goalRevision = Date.now();
+
+function sendControlEvent(
+  connection: RealtimeClientConnection,
+  event: ChatOperationStatusEvent | ChatGoalStateEvent,
+): void {
+  if (connection.readyState !== WS_OPEN_STATE) return;
+  try {
+    connection.send(JSON.stringify(event));
+  } catch (error) {
+    // A disconnected audience cannot interrupt a native operation.
+    console.error('[ChatRunRegistry] Failed to send Codex control event', { error });
+  }
+}
+
+function publishOperationReceipt(
+  receipt: OperationReceipt,
+  outcome: CodexControlResult | { status: 'accepted' },
+): void {
+  receipt.event = { ...receipt.event, ...outcome, timestamp: new Date().toISOString() };
+  for (const connection of receipt.listeners) sendControlEvent(connection, receipt.event);
+  if (outcome.status !== 'accepted') receipt.listeners.clear();
+}
+
+function finishOperationSnapshot(
+  appSessionId: string,
+  initialRevision: number | undefined,
+  goal: CodexGoal | null,
+): number | undefined {
+  const current = codexGoalStates.get(appSessionId);
+  if (current?.revision !== initialRevision) return undefined;
+  return chatRunRegistry.publishCodexGoal(appSessionId, goal);
+}
 
 // Receipts also survive the next turn replacing a run in the registry. The
 // transcript provides delivery evidence after receipts expire or CloudCLI restarts.
@@ -260,15 +310,7 @@ function recordProviderSessionId(run: ChatRun, providerSessionId: string): void 
   run.providerSessionId = providerSessionId;
 
   try {
-    sessionsDb.assignProviderSessionId(run.appSessionId, providerSessionId);
-    void broadcastSessionUpserted(run.appSessionId).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('[ChatRunRegistry] Failed to broadcast canonical session mapping', {
-        appSessionId: run.appSessionId,
-        providerSessionId,
-        error: message,
-      });
-    });
+    persistProviderSessionId(run.appSessionId, providerSessionId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('[ChatRunRegistry] Failed to persist provider session id mapping', {
@@ -277,6 +319,20 @@ function recordProviderSessionId(run: ChatRun, providerSessionId: string): void 
       error: message,
     });
   }
+}
+
+function persistProviderSessionId(appSessionId: string, providerSessionId: string): void {
+  sessionsDb.assignProviderSessionId(appSessionId, providerSessionId);
+  announceProviderSessionMapping(appSessionId);
+}
+
+function announceProviderSessionMapping(appSessionId: string): void {
+  void broadcastSessionUpserted(appSessionId).catch((error) => {
+    console.error('[ChatRunRegistry] Failed to broadcast canonical session mapping', {
+      appSessionId,
+      error,
+    });
+  });
 }
 
 /**
@@ -308,6 +364,8 @@ export const chatRunRegistry = {
      */
     connection: RealtimeClientConnection | null;
     userId: string | number | null;
+    /** Native identity is already available for an autonomous Codex turn. */
+    turnId?: string;
   }): ChatRun | null {
     const existing = runs.get(input.appSessionId);
     if (existing && existing.status === 'running') {
@@ -320,7 +378,7 @@ export const chatRunRegistry = {
       providerSessionId: input.providerSessionId,
       status: 'running',
       lastSeq: 0,
-      turnId: null,
+      turnId: input.turnId ?? null,
       turnSettleConfirmed: false,
       steerReceipts: new Map(),
       events: [],
@@ -362,6 +420,154 @@ export const chatRunRegistry = {
   /** Drops a closed socket from future Codex turns without affecting running tasks. */
   removeCodexSubscriptions(connection: RealtimeClientConnection): void {
     codexSubscriptions.delete(connection);
+  },
+
+  /** Sends the request's latest receipt to a socket reconnecting or retrying it. */
+  sendCodexOperationStatus(
+    appSessionId: string,
+    requestId: string,
+    connection: RealtimeClientConnection,
+  ): boolean {
+    const receipt = operationReceiptsBySession.get(appSessionId)?.get(requestId);
+    if (!receipt) return false;
+    if (receipt.event.status === 'pending' || receipt.event.status === 'accepted') {
+      for (const listener of receipt.listeners) {
+        if (listener.readyState !== WS_OPEN_STATE) receipt.listeners.delete(listener);
+      }
+      receipt.listeners.add(connection);
+    }
+    sendControlEvent(connection, receipt.event);
+    return true;
+  },
+
+  /**
+   * Reserves the request id before the first provider call. A duplicate
+   * receives the current receipt and joins the original request's audience.
+   */
+  async runCodexOperation(input: {
+    appSessionId: string;
+    requestId: string;
+    operation: ChatCodexOperation['kind'];
+    connection: RealtimeClientConnection;
+    execute: (onAccepted: () => void) => CodexControlResult | Promise<CodexControlResult>;
+  }): Promise<void> {
+    const { appSessionId, requestId, operation, connection } = input;
+    if (this.sendCodexOperationStatus(appSessionId, requestId, connection)) return;
+
+    let receipts = operationReceiptsBySession.get(appSessionId);
+    if (!receipts) {
+      receipts = new Map();
+      operationReceiptsBySession.set(appSessionId, receipts);
+    }
+    const receipt: OperationReceipt = {
+      event: {
+        kind: 'chat_operation_status',
+        sessionId: appSessionId,
+        requestId,
+        operation,
+        status: 'pending',
+        timestamp: new Date().toISOString(),
+      },
+      listeners: new Set([connection]),
+    };
+    receipts.set(requestId, receipt);
+
+    let outcome: CodexControlResult;
+    try {
+      outcome = await input.execute(() => {
+        if (receipt.event.status === 'pending') publishOperationReceipt(receipt, { status: 'accepted' });
+      });
+    } catch (error) {
+      outcome = {
+        status: 'failed',
+        code: 'CODEX_NATIVE_ERROR',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    publishOperationReceipt(receipt, outcome);
+  },
+
+  /** Caches and broadcasts a goal notification independently of turn events. */
+  publishCodexGoal(appSessionId: string, goal: CodexGoal | null): number {
+    const event: ChatGoalStateEvent = {
+      kind: 'chat_goal_state',
+      sessionId: appSessionId,
+      goal,
+      revision: ++goalRevision,
+      timestamp: new Date().toISOString(),
+    };
+    codexGoalStates.set(appSessionId, event);
+    for (const [connection, sessions] of codexSubscriptions) {
+      if (sessions.has(appSessionId)) sendControlEvent(connection, event);
+    }
+    return event.revision;
+  },
+
+  /** Replays the latest goal state to a subscriber and returns its revision. */
+  sendCodexGoalState(appSessionId: string, connection: RealtimeClientConnection): number | undefined {
+    const event = codexGoalStates.get(appSessionId);
+    if (event) sendControlEvent(connection, event);
+    return event?.revision;
+  },
+
+  /** Reads the snapshot cursor before an asynchronous native query. */
+  getCodexGoalRevision(appSessionId: string): number | undefined {
+    return codexGoalStates.get(appSessionId)?.revision;
+  },
+
+  /** Includes the requesting tab before a control can immediately start a native turn. */
+  addCodexSubscription(connection: RealtimeClientConnection, appSessionId: string): void {
+    const sessions = codexSubscriptions.get(connection) ?? new Set<string>();
+    sessions.add(appSessionId);
+    codexSubscriptions.set(connection, sessions);
+  },
+
+  /** Publishes a native read or mutation result unless a live update already superseded it. */
+  finishCodexGoalSnapshot: finishOperationSnapshot,
+
+  /** Session-scoped bridge for ordinary turns, manual compaction and autonomous goal turns. */
+  createCodexHooks(input: {
+    appSessionId: string;
+    userId: string | number | null;
+    connection?: RealtimeClientConnection;
+    onAccepted?: () => void;
+  }): CodexControlHooks {
+    const { appSessionId } = input;
+    return {
+      bindThread(threadId) {
+        if (sessionsDb.getSessionById(appSessionId)?.provider_session_id !== threadId) {
+          persistProviderSessionId(appSessionId, threadId);
+        }
+      },
+      discardUnmaterializedThread(threadId) {
+        const session = sessionsDb.getSessionById(appSessionId);
+        if (session?.provider_session_id !== threadId || session.jsonl_path) return;
+        sessionsDb.detachProviderSession(appSessionId);
+        announceProviderSessionMapping(appSessionId);
+      },
+      isTurnRunning: () => this.isProcessing(appSessionId),
+      startTurn: (threadId, turnId) => {
+        const current = runs.get(appSessionId);
+        if (current?.status === 'running') {
+          if (current.turnId === turnId) return current.writer;
+          if (current.turnId) return null;
+          // The app reserved a send, but a native turn started before Codex
+          // accepted it. Its dispatch learns this through CODEX_TURN_BUSY.
+          runs.delete(appSessionId);
+        }
+        return this.startRun({
+          appSessionId,
+          provider: 'codex',
+          providerSessionId: threadId,
+          turnId,
+          connection: input.connection ?? null,
+          userId: input.userId,
+        })?.writer ?? null;
+      },
+      publishGoal: (goal) => this.publishCodexGoal(appSessionId, goal),
+      onAccepted: input.onAccepted ?? (() => {}),
+      onIdle: () => notifyRunSettled(appSessionId),
+    };
   },
 
   getSteerOutcome(appSessionId: string, messageId: string): ChatSteerOutcome | undefined {
@@ -510,5 +716,7 @@ export const chatRunRegistry = {
     runs.clear();
     steerReceiptsBySession.clear();
     codexSubscriptions.clear();
+    operationReceiptsBySession.clear();
+    codexGoalStates.clear();
   },
 };

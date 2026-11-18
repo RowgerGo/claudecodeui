@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { api } from '@/shared/api';
 import type { LLMProvider, Project, SlashCommand } from '@/shared/types';
@@ -78,6 +79,7 @@ export function useProjectSlashCommands(
   provider: LLMProvider,
   { enabled = true }: UseProjectSlashCommandsOptions = {},
 ): UseProjectSlashCommandsResult {
+  const { t } = useTranslation();
   // The fetched list, kept in state because it arrives asynchronously after
   // the project or provider changes and every consumer derives its view from it.
   const [commands, setCommands] = useState<SlashCommand[]>([]);
@@ -108,7 +110,7 @@ export function useProjectSlashCommands(
 
       try {
         const workspacePath = selectedProject.fullPath || selectedProject.path || '';
-        const response = await api.commands.list(workspacePath || selectedProject.path);
+        const response = await api.commands.list(workspacePath || selectedProject.path, provider);
 
         if (!response.ok) {
           throw new Error('Failed to fetch commands');
@@ -124,6 +126,9 @@ export function useProjectSlashCommands(
         const allCommands: SlashCommand[] = [
           ...((data.builtIn || []) as SlashCommand[]).map((command) => ({
             ...command,
+            description: command.descriptionKey
+              ? t(command.descriptionKey, { defaultValue: command.description })
+              : command.description,
             type: 'built-in',
           })),
           ...skillCommands,
@@ -151,7 +156,7 @@ export function useProjectSlashCommands(
     return () => {
       cancelled = true;
     };
-  }, [enabled, selectedProject, provider]);
+  }, [enabled, selectedProject, provider, t]);
 
   return { commands, isLoading, error };
 }

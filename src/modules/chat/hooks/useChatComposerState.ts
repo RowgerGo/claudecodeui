@@ -16,6 +16,7 @@ import { api, ApiRequestError } from '@/shared/api';
 import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
 import { readUserPreference } from '@/shared/userSettings';
 import type { BackgroundSendChoice, BackgroundSendPrompt, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, PendingSteer, QueuedDraft, SessionActivityMap, StatusCommandData, SteerOutcome,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
+import type { CodexChatOperation } from '@/shared/types';
 import { grantClaudeToolPermission } from '@/modules/chat/utils/chatPermissions';
 import {
   appendQueuedMessage,
@@ -75,6 +76,13 @@ type UseChatComposerStateArgs = {
   onShowSettings?: () => void;
   /** Runs the `/clear` command: clears the open session's context. */
   onClearContext?: () => void;
+  onCodexOperation?: (
+    sessionId: string,
+    operation: CodexChatOperation,
+    options: QueuedSendOptions,
+    submittedDraft?: string,
+    editAfterQuery?: boolean,
+  ) => void;
   scrollToBottom: () => void;
   addMessage: (msg: ChatMessage) => void;
   setIsUserScrolledUp: (isScrolledUp: boolean) => void;
@@ -126,6 +134,22 @@ type SubmitOptions = {
 const createFakeSubmitEvent = () => {
   return { preventDefault: () => undefined } as unknown as FormEvent<HTMLFormElement>;
 };
+
+const CODEX_CONTROL_COMMAND = /^\/(compact|goal)(?=\s|$)([\s\S]*)/;
+
+async function createChatSession(project: Project, provider: LLMProvider, initialMessage: string, summary: string | null) {
+  const response = await api.providers.createSession({
+    provider,
+    projectPath: project.fullPath || project.path || '',
+    initialMessage,
+  });
+  if (!response.ok) throw new Error(`Failed to create session (${response.status})`);
+  const body = await response.json();
+  const sessionId: unknown = body?.data?.sessionId;
+  if (typeof sessionId !== 'string' || !sessionId) throw new Error('No session id returned');
+  const sessionName: unknown = body?.data?.sessionName;
+  return { sessionId, summary: (typeof sessionName === 'string' && sessionName.trim()) || summary };
+}
 
 /**
  * A v4 UUID for a steered message. The id becomes the message's transcript
@@ -285,6 +309,7 @@ export function useChatComposerState({
   onFileOpen,
   onShowSettings,
   onClearContext,
+  onCodexOperation,
   scrollToBottom,
   addMessage,
   setIsUserScrolledUp,
@@ -389,6 +414,9 @@ export function useChatComposerState({
   }, []);
   const sessionKeyRef = useRef(sessionKey);
   sessionKeyRef.current = sessionKey;
+  // Session allocation can wait on the gateway while Enter and menu picks repeat.
+  const creatingGoalScopesRef = useRef(new Set<string | null>());
+  const submittingScopesRef = useRef(new Set<string>());
 
   // Recall writes go through the same pair of stores a send reads: the state
   // (for the render) and inputValueRef (so an immediate Enter submits the
@@ -525,9 +553,113 @@ export function useChatComposerState({
     }, 0);
   }, [addMessage]);
 
+  // Snapshot of everything `chat.send` needs beyond the text itself. Built at
+  // send time for immediate sends and at queue time for queued ones, so a
+  // queued message keeps the provider settings it was composed under even if
+  // it is later dispatched outside this composer (app-level auto-send).
+  const buildSendOptions = useCallback((currentInput: string): QueuedSendOptions => {
+    const getToolsSettings = () => readUserPreference(
+      PROVIDER_PERMISSION_PREFERENCE_KEYS[provider],
+      {
+        allowedTools: [],
+        disallowedTools: [],
+        skipPermissions: false,
+      },
+    );
+
+    const toolsSettings = getToolsSettings();
+
+    return {
+      model: currentProviderModel,
+      effort: currentProviderEffort,
+      permissionMode: resolvePermissionModeForProvider(provider, permissionMode),
+      toolsSettings,
+      skipPermissions: toolsSettings?.skipPermissions || false,
+      sessionSummary: getNotificationSessionSummary(selectedSession, currentInput),
+    };
+  }, [
+    currentProviderEffort,
+    currentProviderModel,
+    permissionMode,
+    provider,
+    resolvePermissionModeForProvider,
+    selectedSession,
+  ]);
+
+  const executeCodexCommand = useCallback(async (commandName: string, source: string, fromSubmit: boolean) => {
+    if (!selectedProject || !onCodexOperation) return;
+    const commandMatch = CODEX_CONTROL_COMMAND.exec(source);
+    const matches = commandMatch && `/${commandMatch[1]}` === commandName;
+    // Remove the separator after the command and keep the text of the objective as typed.
+    const objective = matches ? commandMatch[2].replace(/^[ \t]*(?:\r?\n)?/, '') : '';
+    const argument = objective.trim();
+    const draft = matches && inputValueRef.current === source ? source : undefined;
+    const operation: CodexChatOperation = commandName === '/compact'
+      ? { type: 'chat.compact' }
+      : !argument || argument === 'edit'
+        ? { type: 'chat.goal', action: 'get' }
+        : argument === 'pause' || argument === 'resume' || argument === 'clear'
+          ? { type: 'chat.goal', action: argument }
+          : { type: 'chat.goal', action: 'set', objective };
+    const showMessage = (content: string, type: 'assistant' | 'error' = 'assistant') => {
+      addMessage({ type, content, timestamp: Date.now() });
+    };
+    if (operation.type === 'chat.compact' && argument) {
+      showMessage(t('commands.errors.INVALID_CONTROL_REQUEST'), 'error');
+      return;
+    }
+    let targetSessionId = sessionKeyRef.current;
+    if (!targetSessionId && !(operation.type === 'chat.goal' && operation.action === 'set')) {
+      showMessage(t(operation.type === 'chat.compact' ? 'commands.errors.COMPACT_NO_HISTORY' : 'commands.errors.GOAL_NO_GOAL'));
+      return;
+    }
+    if (!isConnected) {
+      showMessage(t('commands.disconnected'), 'error');
+      return;
+    }
+
+    if (draft && draftScopeRef.current) {
+      writeDraftText(draftScopeRef.current, draft, { preserveUntilSaved: true });
+    }
+    const sendOptions = buildSendOptions(operation.type === 'chat.goal' && operation.action === 'set' ? objective : '');
+    if (!targetSessionId) {
+      const scope = draftScopeRef.current;
+      if (creatingGoalScopesRef.current.has(scope) || (!fromSubmit && submittingScopesRef.current.has(scope ?? ''))) return;
+      creatingGoalScopesRef.current.add(scope);
+      try {
+        const created = await createChatSession(selectedProject, provider, objective, getNotificationSessionSummary(null, objective));
+        targetSessionId = created.sessionId;
+        // Establish the draft in the new session before its composer mounts. A later
+        // refusal must leave the submitted objective available in that same chat.
+        if (draft) {
+          writeDraftText(targetSessionId, draft, { preserveUntilSaved: true });
+          if (scope && readDraftText(scope) === draft) writeDraftText(scope, '');
+        }
+        if (draftScopeRef.current === scope) {
+          onSessionEstablished?.(targetSessionId, { provider, project: selectedProject, summary: created.summary });
+        }
+      } catch (error) {
+        if (draftScopeRef.current === scope) {
+          showMessage(t('commands.createSessionFailed', { message: error instanceof Error ? error.message : String(error) }), 'error');
+        }
+        return;
+      } finally {
+        creatingGoalScopesRef.current.delete(scope);
+      }
+    }
+
+    onCodexOperation(targetSessionId, operation, sendOptions, draft, operation.type === 'chat.goal' && argument === 'edit');
+  }, [addMessage, buildSendOptions, isConnected, onCodexOperation, onSessionEstablished, provider, selectedProject, t]);
+
   const executeCommand = useCallback(
     async (command: SlashCommand, rawInput?: string, options?: { preserveInput?: boolean }) => {
       if (!command || !selectedProject) {
+        return;
+      }
+
+      if (provider === 'codex' && (command.name === '/compact' || command.name === '/goal')
+        && (command.type === 'built-in' || command.namespace === 'builtin')) {
+        await executeCodexCommand(command.name, rawInput ?? inputValueRef.current, rawInput !== undefined);
         return;
       }
 
@@ -598,6 +730,7 @@ export function useChatComposerState({
     [
       currentProviderModel,
       currentSessionId,
+      executeCodexCommand,
       handleBuiltInCommand,
       handleCustomCommand,
       input,
@@ -745,39 +878,6 @@ export function useChatComposerState({
     noClick: true,
     noKeyboard: true,
   });
-
-  // Snapshot of everything `chat.send` needs beyond the text itself. Built at
-  // send time for immediate sends and at queue time for queued ones, so a
-  // queued message keeps the provider settings it was composed under even if
-  // it is later dispatched outside this composer (app-level auto-send).
-  const buildSendOptions = useCallback((currentInput: string): QueuedSendOptions => {
-    const getToolsSettings = () => readUserPreference(
-      PROVIDER_PERMISSION_PREFERENCE_KEYS[provider],
-      {
-        allowedTools: [],
-        disallowedTools: [],
-        skipPermissions: false,
-      },
-    );
-
-    const toolsSettings = getToolsSettings();
-
-    return {
-      model: currentProviderModel,
-      effort: currentProviderEffort,
-      permissionMode: resolvePermissionModeForProvider(provider, permissionMode),
-      toolsSettings,
-      skipPermissions: toolsSettings?.skipPermissions || false,
-      sessionSummary: getNotificationSessionSummary(selectedSession, currentInput),
-    };
-  }, [
-    currentProviderEffort,
-    currentProviderModel,
-    permissionMode,
-    provider,
-    resolvePermissionModeForProvider,
-    selectedSession,
-  ]);
 
   // Read at send time through a ref: the map changes on every poll, and a
   // submit handler rebuilt that often would re-render the whole composer.
@@ -1256,6 +1356,16 @@ export function useChatComposerState({
       // chat switch, and the cleanup at the end must not empty whichever chat is open by then.
       const submittedScope = draftScopeRef.current;
 
+      // Session controls run outside a chat turn, even when this session is busy.
+      if (provider === 'codex' && !queuedSubmission && !submitOptions?.skipCommandInterception) {
+        const control = CODEX_CONTROL_COMMAND.exec(currentInput);
+        if (control) {
+          resetCommandMenuState();
+          await executeCommand({ name: `/${control[1]}`, type: 'built-in' }, currentInput);
+          return;
+        }
+      }
+
       // `/btw <question>` never becomes a turn: checked before the in-flight
       // queue below, since that branch runs before slash-command
       // interception ever would. Recognised in every state, including a
@@ -1389,7 +1499,6 @@ export function useChatComposerState({
         }
       }
 
-      const resolvedProjectPath = selectedProject.fullPath || selectedProject.path || '';
       const sessionSummary = getNotificationSessionSummary(selectedSession, currentInput);
 
       // The conversation always has a stable backend-allocated session id
@@ -1398,51 +1507,24 @@ export function useChatComposerState({
       // handoff later — this id stays valid for the conversation's lifetime.
       let targetSessionId = selectedSession?.id || currentSessionId || null;
       if (!targetSessionId) {
-        let createdSessionName = sessionSummary;
         try {
-          const response = await api.providers.createSession({
+          const created = await createChatSession(selectedProject, provider, messageContent, sessionSummary);
+          targetSessionId = created.sessionId;
+          onSessionEstablished?.(targetSessionId, {
             provider,
-            projectPath: resolvedProjectPath,
-            initialMessage: messageContent,
+            project: selectedProject,
+            summary: created.summary,
           });
-          if (!response.ok) {
-            throw new Error(`Failed to create session (${response.status})`);
-          }
-          const body = await response.json();
-          targetSessionId = body?.data?.sessionId || null;
-          // A blank server name would leave the session unlabeled, so the local
-          // summary stays the fallback unless a real name comes back.
-          const returnedSessionName = typeof body?.data?.sessionName === 'string'
-            ? body.data.sessionName.trim()
-            : '';
-          if (returnedSessionName) {
-            createdSessionName = returnedSessionName;
-          }
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown error';
           console.error('Session creation failed:', error);
           addMessage({
             type: 'error',
             content: `Failed to start a new session: ${message}`,
-            timestamp: new Date(),
+            timestamp: Date.now(),
           });
           return;
         }
-
-        if (!targetSessionId) {
-          addMessage({
-            type: 'error',
-            content: 'Failed to start a new session: no session id returned.',
-            timestamp: new Date(),
-          });
-          return;
-        }
-
-        onSessionEstablished?.(targetSessionId, {
-          provider,
-          project: selectedProject,
-          summary: createdSessionName,
-        });
       }
 
       // A new turn replaces the CLI process a session's background work runs
@@ -1589,8 +1671,6 @@ export function useChatComposerState({
   // text stays, send stays enabled), so on a slow server the user submits
   // again — and each extra submit of a new chat allocated its own session and
   // sent it the same first message.
-  const submittingScopesRef = useRef(new Set<string>());
-
   const handleSubmit = useCallback(
     async (
       event: FormEvent<HTMLFormElement> | MouseEvent | TouchEvent | KeyboardEvent<HTMLTextAreaElement>,
@@ -1598,7 +1678,7 @@ export function useChatComposerState({
       submitOptions?: SubmitOptions,
     ) => {
       const scope = draftScopeRef.current ?? '';
-      if (submittingScopesRef.current.has(scope)) {
+      if (submittingScopesRef.current.has(scope) || creatingGoalScopesRef.current.has(draftScopeRef.current)) {
         // Still cancel the event: an ignored form submit must not reload the page.
         event.preventDefault();
         return;
@@ -1832,6 +1912,15 @@ export function useChatComposerState({
           askSideQuestionAndClear(sessionKey, inputValueRef.current);
           return;
         }
+
+        // A multi-line goal may itself contain a slash. An open suggestion at
+        // the cursor should not replace a command that already has arguments.
+        if (provider === 'codex' && !event.shiftKey && !event.altKey
+          && (event.ctrlKey || event.metaKey || (!sendByCtrlEnter && !isSoftKeyboardEnvironment()))
+          && CODEX_CONTROL_COMMAND.exec(inputValueRef.current)?.[2]) {
+          void handleSubmit(event);
+          return;
+        }
       }
 
       if (handleCommandMenuKeyDown(event)) {
@@ -1878,6 +1967,7 @@ export function useChatComposerState({
       handleFileMentionsKeyDown,
       handleHistoryKeyDown,
       handleSubmit,
+      provider,
       sendByCtrlEnter,
       sessionKey,
       showCommandMenu,
@@ -1929,8 +2019,9 @@ export function useChatComposerState({
     sendMessage({
       type: 'chat.abort',
       sessionId: targetSessionId,
+      ...(provider === 'codex' && activeCodexTurnId ? { expectedTurnId: activeCodexTurnId } : {}),
     });
-  }, [canAbortSession, currentSessionId, selectedSession?.id, sendMessage]);
+  }, [activeCodexTurnId, canAbortSession, currentSessionId, provider, selectedSession?.id, sendMessage]);
 
   const handleGrantToolPermission = useCallback(
     (suggestion: { entry: string; toolName: string }) => {
@@ -1997,6 +2088,7 @@ export function useChatComposerState({
 
   return {
     input,
+    isCodexControlInput: provider === 'codex' && CODEX_CONTROL_COMMAND.test(input),
     setInput,
     editingAnchorId,
     beginEditMessage,
