@@ -1,5 +1,84 @@
 # 待实现任务清单
 
+## Codex 网页聊天支持 `/compact` 和 `/goal`
+
+基于 `custom` 的 `7e82bb8a` 和项目内置的 Codex CLI `0.170.0`。交付目标是让用户在同一聊天中手动压缩上下文，并让 Codex 在浏览器关闭后仍能围绕目标继续工作。按以下三个提交实施，每项通过其验收条件后勾选。
+
+### 提交 1 · 接入 Codex 会话命令
+
+- [ ] **1.1 在命令菜单和输入框识别两个命令**
+
+  1. 为命令列表请求增加可选的 `provider`，在 Codex 的聊天菜单、快捷设置命令列表和帮助中登记 `/compact` 和 `/goal`。复用两个界面已有的命令来源。涉及显示的命令说明、状态和错误文案走现有 i18n。 [命令注册](../server/modules/commands/commands.routes.ts) · [共享命令列表](../src/shared/hooks/useProjectSlashCommands.ts) · [前端 API](../src/shared/api.ts)
+  2. 让菜单点击、键盘选中和直接输入共用同一个命令处理函数。直接输入按行首完整命令名匹配，在排队和轮内引导之前分发。保留 Tab 补全以及自定义命令展开时跳过再次解析的行为。 [命令菜单](../src/modules/chat/hooks/useSlashCommands.ts) · [输入提交](../src/modules/chat/hooks/useChatComposerState.ts)
+
+  **验收条件**　Codex 的两个菜单都能找到新命令。直接发送多行目标保留原文，输入 `/goalkeeper` 仍按普通文本发送。普通轮运行时输入 `/goal pause` 进入命令处理函数一次，`chat.send`、`chat.steer` 和队列写入各为零。切换其他提供方可继续使用其已有的同名自定义命令。
+
+- [ ] **1.2 实现会话控制消息、独立回执和请求去重**
+
+  1. 在聊天 WebSocket 增加 `chat.compact` 和 `chat.goal`。请求携带应用 `sessionId`、`requestId`，目标操作另带动作与对应参数。服务端从会话记录解析提供方、工作目录和原生线程 ID，校验参数后交给 Codex 运行时。把消息及回执类型加入前后端共享类型，并补充 WebSocket 协议文档。 [WebSocket 网关](../server/modules/websocket/services/chat-websocket.service.ts) · [后端类型](../server/shared/types.ts) · [前端类型](../src/shared/types.ts) · [传输协议](architecture/01-websocket-transport.md)
+  2. 按会话和请求 ID 在第一次原生调用前登记操作。同一请求重发时返回进行中或已知结果。将请求受理、拒绝和实际执行结果分别回显，错误只更新对应操作。浏览器用原请求 ID 核对丢失的回执，服务重启后无法确认结果时保留「待确认」。 [运行注册表](../server/modules/websocket/services/chat-run-registry.service.ts) · [网页事件处理](../src/modules/chat/hooks/useChatRealtimeHandlers.ts)
+
+  **验收条件**　丢弃第一次回执后重发相同请求 ID，只观察到一次原生写操作。非 Codex 会话或非法参数收到对应请求的错误，原生调用数为零。模拟操作被拒绝时，原聊天仍能流式输出，未提交的目标文本及附件仍在原会话草稿中。
+
+### 提交 2 · 完成手动上下文压缩
+
+- [ ] **2.1 在空闲线程上发起一次压缩**
+
+  1. `/compact` 接受零个参数。尚无可压缩历史时直接提示，空白聊天无需分配线程。已有历史时由后端取得原生线程，使用同一会话的连接，必要时恢复原线程并沿用模型、目录和权限设置。
+  2. 将忙碌检查和占用会话放进同一次调度操作，同时检查当前轮、已受理的压缩和原生目标状态。首版仅允许空闲且目标未激活的线程手动压缩。先订阅通知，再调用 `thread/compact/start({ threadId })`。保护也适用于相反方向，压缩进行时先拒绝会立即开轮的目标创建、替换或恢复。0.170.0 的压缩处理会先停止该线程已有的任务。 [运行时](../server/modules/providers/list/codex/codex-runtime.provider.ts) · [原生压缩实现](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/core/src/session/handlers.rs#L271-L278)
+
+  **验收条件**　空白聊天、带多余参数、当前轮忙碌或目标为 `active` 时均不发出压缩 RPC。空闲会话双击只触发一次压缩。在两个标签页同时压缩和恢复目标，只有先获准的操作进入 Codex，另一方收到可理解的提示，现有轮次没有被替换。
+
+- [ ] **2.2 展示压缩进度，并让刷新后的历史与实时页面一致**
+
+  1. `thread/compact/start` 返回 `{}` 时记录「已受理」。按 `threadId`、`turnId`、`item.id` 关联 `contextCompaction` 的 `item/started` 和 `item/completed`。用同一行显示进度，在匹配轮次成功结束后标记完成。对中断、原生错误和子进程退出收尾并释放对应运行位置。 [官方压缩协议测试](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/app-server/tests/suite/v2/compaction.rs#L534-L560)
+  2. 将实时条目和历史中的 `context_compacted` 等压缩记录映射到现有 `CompactionInfo`。按原生 ID 合并，旧记录缺 ID 时按对应轮次和边界去重。手动和自动压缩都走现有压缩行，只显示原生实际提供的摘要及用量。 [Codex 历史读取](../server/modules/providers/list/codex/codex-sessions.provider.ts) · [压缩行合并](../src/modules/chat/hooks/useChatMessages.ts) · [压缩行渲染](../src/modules/chat/transcript/MessageComponent.tsx)
+
+  **验收条件**　在 RPC 已应答、压缩尚未完成时页面仍显示进行中。分别模拟成功、失败、中断和进程退出，运行位置均能释放，只有成功场景显示完成。手动压缩和自动压缩各测一次，刷新后每次压缩各有一行，继续聊天仍使用原线程。
+
+### 提交 3 · 完成持久目标和自动续轮
+
+- [ ] **3.1 接入目标查询、创建、编辑、暂停、恢复和清除**
+
+  1. 实现以下命令映射。设置与清除由用户显式操作触发时传入 `origin: "user"`。暂停、恢复只提交新状态。无目标、预算或账号限制、Goals 功能关闭等情况，按原生结果返回。 [原生目标协议](https://learn.chatgpt.com/docs/app-server#manage-a-thread-goal)
+
+     | 网页命令 | 实现 |
+     | --- | --- |
+     | `/goal` | 用 `thread/goal/get` 获取目标，空白聊天直接显示「尚无目标」。 |
+     | `/goal <目标>` | 通过 `thread/goal/set` 激活目标。新聊天先取得应用会话 ID，按当前目录、模型、推理强度及权限设置创建持久原生线程，保存映射后再设置目标。 |
+     | `/goal edit` | 读取现有目标，预填编辑框，保存时原地更新文本并保留状态和预算。 |
+     | `/goal pause`、`/goal resume` | 调用 `thread/goal/set`，分别提交 `paused` 或 `active`。 |
+     | `/goal clear` | 调用 `thread/goal/clear`，按结果显示「已清除」或「尚无目标」。 |
+
+  2. 输入新目标时，如已有未完成目标，显示旧目标和新目标供确认。确认替换后按 0.170.0 原生客户端的顺序清除再设置。把两步纳入同一会话操作，提交前核对被替换的目标。如果清除成功但设置失败，重读实际状态并保留新目标草稿。 [原生编辑与替换](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/tui/src/app/thread_goal_actions.rs#L132-L207)
+
+  **验收条件**　以目标作为新聊天的第一条输入，产生一条应用会话、一条持久原生线程、一次目标设置，CloudCLI 主动发送的 `turn/start` 为零。查询空白聊天创建的会话数为零。分别验证取消替换、编辑后保留预算、暂停后恢复，以及替换第二步失败后页面显示真实目标状态。
+
+- [ ] **3.2 让同一会话连接接收多个原生轮次**
+
+  1. 将 App Server 连接的生命周期和单轮运行记录分开。普通聊天、目标操作和压缩复用当前会话已持有的连接。先挂线程通知，再打开或恢复线程。目标为活动状态时跨轮保留连接，包括普通聊天中由 Codex 工具创建目标的情况。原生 `set(active)` 可自行开轮，续轮由 Codex 发起。 [App Server 客户端](../server/modules/providers/list/codex/codex-app-server.client.ts) · [Codex 运行时](../server/modules/providers/list/codex/codex-runtime.provider.ts) · [原生目标处理](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/app-server/src/request_processors/thread_goal_processor.rs#L149-L250)
+  2. 每个原生 `turnId` 分别进入现有运行注册表，各自推流、结算一次并绑定自己的引导和停止操作。让用户消息、排队消息、手动压缩和自动续轮在同一会话协调。若原生续轮已先启动，保留待投递消息，在可用时只发送一次。目标暂停或清除时，等已在运行的轮次结算后再回收空闲连接。 [运行注册表](../server/modules/websocket/services/chat-run-registry.service.ts) · [排队调度](../server/modules/scheduled-messages/services/scheduled-message-dispatcher.service.ts)
+
+  **验收条件**　让目标实际经过 A、B 两个不同的原生轮次，B 的文本可见，发给 B 的引导和停止只命中 B。A 结束时排队的用户消息恰好投递一次。运行中执行 `/goal pause` 或 `/goal clear` 后，当前轮可以收尾，之后自动新开轮数为零。另一个会话继续正常工作。
+
+- [ ] **3.3 展示目标状态并恢复断线会话**
+
+  1. 将 `thread/goal/updated` 和 `thread/goal/cleared` 按线程映射为应用会话事件，允许事件缺少 `turnId`。在聊天输入框附近展示目标、状态、已用 token 和可选预算。覆盖 `active`、`paused`、`blocked`、`usageLimited`、`budgetLimited`、`complete` 六种状态，按钮和斜杠命令调用同一操作。
+  2. 在 `chat.subscribe` 恢复目标快照、当前轮和已有事件回放。用会话标识和事件顺序避免旧查询覆盖新事件。网页断开只移除订阅，后端继续执行。服务进程重启后先从 Codex 读回目标，按实际状态提供恢复操作。 [会话订阅](../server/modules/websocket/services/chat-websocket.service.ts) · [客户端事件处理](../src/modules/chat/hooks/useChatRealtimeHandlers.ts)
+
+  **验收条件**　关闭所有浏览器标签页，服务端仍能完成 A 并接收 B。重新打开时看到正确目标和 B 的输出或历史。双标签页暂停与清除后状态一致。切换会话后迟到的旧快照只属于原会话。重启服务并打开已暂停的目标，仍显示暂停，查询本身启动的轮次数为零。
+
+- [ ] **3.4 运行自动化测试并完成真实网页验收**
+
+  1. 用可控制通知顺序的 App Server 替身测试命令去重、压缩乱序或失败、目标自动开轮、回执丢失和进程退出。扩展现有的 [Codex 运行时测试](../server/modules/providers/tests/codex-runtime.test.ts)、[运行注册表测试](../server/modules/websocket/tests/chat-run-registry.test.ts)、[命令输入测试](../src/modules/chat/tests/slashCommandArguments.test.ts) 和 [压缩行测试](../src/modules/chat/tests/compactionRows.test.ts)。
+  2. 运行 `npm test`、`NODE_ENV=test npm run test:client`、`npm run typecheck`、`npm run lint` 和 `npm run build`。在隔离的 CloudCLI 实例使用内置 Codex 和浏览器，核对新聊天、旧会话续聊、双标签页并发、刷新、关页、服务重启、排队、引导和停止。
+
+  **验收条件**
+
+  - 关闭网页后目标至少自动续一轮，记录可对应到同一线程的两个不同轮次。
+  - 有正在执行的轮次或活动目标时，手动压缩的 RPC 次数为零，原任务仍可继续。
+  - 本节单独记录提交、CLI 版本、各场景的预期与实测，以及自动化测试结果。类型检查和构建通过，lint 无新增问题。
+
 ## Codex 聊天支持排队和轮内引导
 
 目标是在 Codex 执行期间，让用户决定一条新消息何时生效。「排队」等当前轮结束后再开始下一轮。「引导」把补充要求送进当前轮，影响接下来的工作，已经执行的命令和文件修改仍然有效。初始默认值为「排队」，用户可以更改默认值，也可以在发送时临时选择。
