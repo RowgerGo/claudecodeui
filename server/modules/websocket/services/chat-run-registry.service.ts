@@ -2,12 +2,18 @@ import { sessionsDb } from '@/modules/database/index.js';
 import { ChatSessionWriter } from '@/modules/websocket/services/chat-session-writer.service.js';
 import { broadcastSessionUpserted } from '@/modules/websocket/services/session-upsert-broadcast.service.js';
 import type {
+  ChatSteerOutcome,
   LLMProvider,
   NormalizedMessage,
   RealtimeClientConnection,
 } from '@/shared/types.js';
+import { createNormalizedMessage } from '@/shared/utils.js';
 
 type ChatRunStatus = 'running' | 'completed';
+
+type SteerReceipt = {
+  outcome: ChatSteerOutcome;
+};
 
 /**
  * One live (or recently finished) provider run for a single app session.
@@ -29,6 +35,9 @@ type ChatRun = {
   providerSessionId: string | null;
   status: ChatRunStatus;
   lastSeq: number;
+  turnId: string | null;
+  turnSettleConfirmed: boolean;
+  steerReceipts: Map<string, SteerReceipt>;
   events: NormalizedMessage[];
   writer: ChatSessionWriter;
   startedAt: number;
@@ -58,6 +67,44 @@ const MAX_BUFFERED_EVENTS_PER_RUN = 5000;
  * path all consult it instead of asking each provider runtime individually.
  */
 const runs = new Map<string, ChatRun>();
+
+// A chat view subscribed while idle also needs the next Codex turn's stream
+// when the queue dispatcher starts the turn without a browser socket.
+const codexSubscriptions = new Map<RealtimeClientConnection, Set<string>>();
+
+// Receipts also survive the next turn replacing a run in the registry. The
+// transcript provides delivery evidence after receipts expire or CloudCLI restarts.
+const steerReceiptsBySession = new Map<string, Map<string, SteerReceipt>>();
+
+function reserveSteer(sessionId: string, messageId: string): SteerReceipt {
+  let receipts = steerReceiptsBySession.get(sessionId);
+  if (!receipts) {
+    receipts = new Map();
+    steerReceiptsBySession.set(sessionId, receipts);
+  }
+  const receipt: SteerReceipt = { outcome: 'unknown' };
+  receipts.set(messageId, receipt);
+  return receipt;
+}
+
+function expireReceipt(sessionId: string, messageId: string, receipt: SteerReceipt): void {
+  const timer = setTimeout(() => {
+    const receipts = steerReceiptsBySession.get(sessionId);
+    if (receipts?.get(messageId) !== receipt) return;
+    receipts.delete(messageId);
+    if (receipts.size === 0) steerReceiptsBySession.delete(sessionId);
+  }, COMPLETED_RUN_RETENTION_MS);
+  timer.unref?.();
+}
+
+function publishSteerOutcome(run: ChatRun, messageId: string, outcome: ChatSteerOutcome): void {
+  run.writer.send(createNormalizedMessage({
+    kind: 'chat_steer_status',
+    provider: run.provider,
+    messageId,
+    outcome,
+  }));
+}
 
 /**
  * Answers whether a completed run must stay registered a while longer. Set by
@@ -109,12 +156,39 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     return null;
   }
 
+  if (message.kind === 'turn_started' && message.turnId) {
+    // The registry can outlive a socket, so subscriptions can recover the
+    // native turn to steer even if they missed its start event.
+    run.turnId = message.turnId;
+  }
+
+  if (message.kind === 'text' && message.role === 'user') {
+    const receipt = run.steerReceipts.get(message.id);
+    if (receipt) {
+      if (receipt.outcome === 'delivered') return null;
+      receipt.outcome = 'delivered';
+    }
+  }
+
+  if (message.kind === 'complete') {
+    run.turnSettleConfirmed = message.turnSettleConfirmed === true;
+    for (const [messageId, receipt] of run.steerReceipts) {
+      if (receipt.outcome === 'accepted') {
+        receipt.outcome = run.turnSettleConfirmed ? 'unread' : 'unknown';
+        publishSteerOutcome(run, messageId, receipt.outcome);
+      }
+      expireReceipt(run.appSessionId, messageId, receipt);
+    }
+    run.steerReceipts.clear();
+  }
+
   run.lastSeq += 1;
 
   const outbound: NormalizedMessage = {
     ...message,
     sessionId: run.appSessionId,
     seq: run.lastSeq,
+    ...(run.turnId ? { turnId: run.turnId } : {}),
   };
 
   if (message.kind === 'complete') {
@@ -228,10 +302,9 @@ export const chatRunRegistry = {
     provider: LLMProvider;
     providerSessionId: string | null;
     /**
-     * The socket that asked for this run, or `null` for one nobody is watching
-     * — a scheduled message fires with no browser attached. The writer's event
-     * buffer still records everything, so a client that subscribes later
-     * replays the run from its start.
+     * The socket that asked for this run, or `null` for a detached turn
+     * started by a queue or timer. Subscribed Codex viewers still receive
+     * that turn, and later viewers can replay the writer's event buffer.
      */
     connection: RealtimeClientConnection | null;
     userId: string | number | null;
@@ -247,6 +320,9 @@ export const chatRunRegistry = {
       providerSessionId: input.providerSessionId,
       status: 'running',
       lastSeq: 0,
+      turnId: null,
+      turnSettleConfirmed: false,
+      steerReceipts: new Map(),
       events: [],
       writer: null as unknown as ChatSessionWriter,
       startedAt: Date.now(),
@@ -263,6 +339,11 @@ export const chatRunRegistry = {
       },
       decorateOutboundEvent: (message) => decorateAndRecordEvent(run, message),
     });
+    if (input.provider === 'codex') {
+      for (const [connection, sessions] of codexSubscriptions) {
+        if (sessions.has(input.appSessionId)) run.writer.updateWebSocket(connection);
+      }
+    }
 
     runs.set(input.appSessionId, run);
     return run;
@@ -270,6 +351,68 @@ export const chatRunRegistry = {
 
   getRun(appSessionId: string): ChatRun | undefined {
     return runs.get(appSessionId);
+  },
+
+  /** Tracks the Codex sessions viewed by a socket across idle and active turns. */
+  setCodexSubscriptions(connection: RealtimeClientConnection, sessions: Set<string>): void {
+    if (sessions.size > 0) codexSubscriptions.set(connection, sessions);
+    else codexSubscriptions.delete(connection);
+  },
+
+  /** Drops a closed socket from future Codex turns without affecting running tasks. */
+  removeCodexSubscriptions(connection: RealtimeClientConnection): void {
+    codexSubscriptions.delete(connection);
+  },
+
+  getSteerOutcome(appSessionId: string, messageId: string): ChatSteerOutcome | undefined {
+    return steerReceiptsBySession.get(appSessionId)?.get(messageId)?.outcome;
+  },
+
+  /**
+   * Reserves the id before invoking the provider to deduplicate concurrent
+   * requests, and publishes its outcome to sockets attached during the RPC.
+   * The gateway supplies a validated message id and the browser's target turn.
+   */
+  async steerCodex(input: {
+    appSessionId: string;
+    turnId: string;
+    messageId: string;
+    connection: RealtimeClientConnection;
+    deliver: () => Promise<boolean>;
+  }): Promise<ChatSteerOutcome | undefined> {
+    const { appSessionId, turnId, messageId } = input;
+    const existing = steerReceiptsBySession.get(appSessionId)?.get(messageId);
+    if (existing) return existing.outcome;
+
+    const receipt = reserveSteer(appSessionId, messageId);
+    const run = runs.get(appSessionId);
+    if (run?.status !== 'running' || run.provider !== 'codex' || run.turnId !== turnId) {
+      receipt.outcome = 'refused';
+      expireReceipt(appSessionId, messageId, receipt);
+      return receipt.outcome;
+    }
+
+    run.steerReceipts.set(messageId, receipt);
+    run.writer.updateWebSocket(input.connection);
+    let outcome: ChatSteerOutcome;
+    try {
+      const accepted = await input.deliver();
+      outcome = accepted ? 'accepted' : 'refused';
+      if (accepted && run.completedAt !== null) {
+        outcome = run.turnSettleConfirmed ? 'unread' : 'unknown';
+      }
+    } catch {
+      // A transport failure could have happened after the provider queued it.
+      outcome = 'unknown';
+    }
+
+    // The echo may have happened before the RPC response, including when the
+    // response was lost. Never downgrade a delivered message.
+    if (receipt.outcome !== 'delivered') {
+      receipt.outcome = outcome;
+      publishSteerOutcome(run, messageId, outcome);
+    }
+    return undefined;
   },
 
   isProcessing(appSessionId: string): boolean {
@@ -365,5 +508,7 @@ export const chatRunRegistry = {
    */
   clearAll(): void {
     runs.clear();
+    steerReceiptsBySession.clear();
+    codexSubscriptions.clear();
   },
 };

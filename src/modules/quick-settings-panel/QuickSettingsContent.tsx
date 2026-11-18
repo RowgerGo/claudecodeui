@@ -104,6 +104,17 @@ export default function QuickSettingsContent({
         <p className="ml-3 text-xs text-muted-foreground">
           {t('quickSettings.sendByCtrlEnterDescription')}
         </p>
+        <label className={SETTING_ROW_CLASS}>
+          <span className="text-sm text-foreground">{t('quickSettings.codexFollowUp')}</span>
+          <select
+            className="rounded-md border border-input bg-background px-2 py-1 text-sm text-foreground"
+            value={preferences.codexSteerByDefault ? 'steer' : 'queue'}
+            onChange={(event) => onPreferenceChange('codexSteerByDefault', event.target.value === 'steer')}
+          >
+            <option value="queue">{t('quickSettings.codexFollowUpQueue')}</option>
+            <option value="steer">{t('quickSettings.codexFollowUpSteer')}</option>
+          </select>
+        </label>
       </QuickSettingsSection>
     </div>
   );

@@ -72,9 +72,8 @@ function isVisibleCodexUserMessage(payload: AnyRecord | null | undefined): boole
 /**
  * Follows which turn a Codex rollout is inside as its rows stream past.
  *
- * Codex writes no per-row id — every line is `{timestamp, type, payload}` and
- * the `user_message` event that carries a prompt has no identity of its own —
- * so a turn id is the only durable address a user message has. Turns are
+ * Each rollout line is `{timestamp, type, payload}`. A user message can have
+ * a client id for delivery matching, but thread forks address only turns. Turns are
  * bracketed by rows that do carry `turn_id`: `task_started` opens one,
  * `turn_context` restates it, `task_complete` closes it, and the prompt is
  * written between them. That id is also exactly what `thread/fork` cuts at,
@@ -1323,6 +1322,17 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
   const turns = createCodexTurnTracker();
   /** Turns whose prompt already carries the anchor, so only the first does. */
   const anchoredTurnIds = new Set<string>();
+  /** New rollouts can expose the same user item as both an item and a legacy event. */
+  const recordedClientMessageIds = new Set<string>();
+  const recordUserMessage = (row: AnyRecord, clientId: unknown) => {
+    const id = readNonEmptyString(clientId);
+    if (id && recordedClientMessageIds.has(id)) return;
+    if (id) {
+      recordedClientMessageIds.add(id);
+      row.uuid = id;
+    }
+    messages.push(row);
+  };
 
   /** Emits a tool_result row unless the call already produced one. */
   const pushToolResult = (callId: string, timestamp: string, output: string, isError: boolean) => {
@@ -1458,7 +1468,7 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
               ...(images ? { images } : {}),
               ...(isFirstPromptOfTurn ? { turnId } : {}),
             };
-            messages.push(row);
+            recordUserMessage(row, item.client_id);
           }
         }
         continue;
@@ -1474,13 +1484,13 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
         if (isFirstPromptOfTurn) {
           anchoredTurnIds.add(turnId as string);
         }
-        messages.push({
+        recordUserMessage({
           type: 'user',
           timestamp,
           message: { role: 'user', content: payload.message },
           images: extractCodexUserImages(payload),
           ...(isFirstPromptOfTurn ? { turnId } : {}),
-        });
+        }, payload.client_id);
       }
       continue;
     }
@@ -2027,7 +2037,7 @@ export class CodexSessionsProvider implements IProviderSessions {
   /**
    * Normalizes a persisted Codex JSONL entry.
    *
-   * Live Codex SDK events are transformed before they reach normalizeMessage(),
+   * Live Codex App Server events are transformed before they reach normalizeMessage(),
    * while history entries already use the compact message/tool shape produced
    * by getCodexSessionMessages().
    */
@@ -2151,7 +2161,7 @@ export class CodexSessionsProvider implements IProviderSessions {
   }
 
   /**
-   * Normalizes either a Codex history entry or a transformed live SDK event.
+   * Normalizes either a Codex history entry or a transformed live App Server event.
    */
   normalizeMessage(rawMessage: unknown, sessionId: string | null): NormalizedMessage[] {
     const raw = readObjectRecord(rawMessage);
@@ -2159,7 +2169,7 @@ export class CodexSessionsProvider implements IProviderSessions {
       return [];
     }
 
-    if (raw.message?.role) {
+    if (raw.type !== 'item' && raw.message?.role) {
       return this.normalizeHistoryEntry(raw, sessionId);
     }
 
@@ -2167,7 +2177,7 @@ export class CodexSessionsProvider implements IProviderSessions {
     const baseId = raw.uuid || generateMessageId('codex');
 
     if (raw.type === 'item') {
-      // Live items carry a stable SDK id, so an in-progress row and its later
+      // Live items carry a stable item id, so an in-progress row and its later
       // completion collapse onto the same transcript entry instead of stacking.
       const itemId = readNonEmptyString(raw.itemId as string | undefined) ?? baseId;
 
@@ -2175,6 +2185,7 @@ export class CodexSessionsProvider implements IProviderSessions {
         case 'agent_message': {
           const cited = readCodexMemoryCitations(String(raw.message?.content || ''));
           const text = cited.text;
+          const memoryCitations = cited.memoryCitations ?? raw.memoryCitations;
           const proposedPlan = readCodexProposedPlan(text);
           if (proposedPlan) {
             // Same unification as history: a proposed plan is a plan card, not
@@ -2188,7 +2199,7 @@ export class CodexSessionsProvider implements IProviderSessions {
               toolName: 'ExitPlanMode',
               toolInput: { plan: proposedPlan },
               toolId: itemId,
-              memoryCitations: cited.memoryCitations,
+              memoryCitations,
             })];
           }
           return [createNormalizedMessage({
@@ -2199,7 +2210,7 @@ export class CodexSessionsProvider implements IProviderSessions {
             kind: 'text',
             role: 'assistant',
             content: text,
-            memoryCitations: cited.memoryCitations,
+            memoryCitations,
           })];
         }
         case 'reasoning':
@@ -2227,7 +2238,7 @@ export class CodexSessionsProvider implements IProviderSessions {
           if (raw.status === 'in_progress' && !partialOutput) {
             return [toolUse];
           }
-          // The SDK reports a command's output on the item itself; the UI reads
+          // App Server provides aggregated output; the UI reads
           // tool output from a paired result, so one is emitted here. Emitting
           // it while the command is still running is what lets its output
           // stream into the row instead of appearing only at the end.

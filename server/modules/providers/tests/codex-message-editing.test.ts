@@ -145,6 +145,35 @@ test('only the first prompt of a turn is anchored', { concurrency: false }, asyn
   });
 });
 
+test('Codex history keeps a steering message id and merges dual event formats', { concurrency: false }, async () => {
+  const clientId = '9f533d5b-0d08-4c41-a5ee-c3abe714c98e';
+  const rows = [
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-a' } },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'initial prompt' } },
+    { type: 'event_msg', payload: {
+      type: 'item_completed',
+      turn_id: 'turn-a',
+      item: {
+        type: 'UserMessage',
+        id: 'native-echo-id',
+        client_id: clientId,
+        content: [{ type: 'text', text: 'steered prompt' }],
+      },
+    } },
+    { type: 'event_msg', payload: { type: 'user_message', client_id: clientId, message: 'steered prompt' } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-a' } },
+  ];
+  await withIndexedSession(rows, async ({ sessionId }) => {
+    const history = await new CodexSessionsProvider().fetchHistory(sessionId);
+    const prompts = history.messages.filter((message) => message.role === 'user');
+    assert.equal(prompts.length, 2);
+    assert.equal(prompts[0].transcriptAnchorId, 'turn-a');
+    assert.equal(prompts[1].id, clientId);
+    assert.equal(prompts[1].content, 'steered prompt');
+    assert.equal(prompts[1].transcriptAnchorId, undefined);
+  });
+});
+
 test('a turn the thread rolled back keeps its rows but loses its anchor', { concurrency: false }, async () => {
   const rows = [
     ...turn('turn-a', ['first prompt']),

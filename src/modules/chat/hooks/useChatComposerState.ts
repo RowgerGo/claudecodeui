@@ -32,6 +32,7 @@ import { useFileMentions } from '@/modules/chat/hooks/useFileMentions';
 import { useInputHistory } from '@/modules/chat/hooks/useInputHistory';
 import { useSlashCommands } from '@/modules/chat/hooks/useSlashCommands';
 import { useAskSideQuestion } from '@/modules/chat/hooks/useSideQuestions';
+import { readPendingCodexSteers, writePendingCodexSteers } from '@/modules/chat/utils/pendingSteers';
 
 type UseChatComposerStateArgs = {
   selectedProject: Project | null;
@@ -51,12 +52,16 @@ type UseChatComposerStateArgs = {
   processingSessions?: SessionActivityMap;
   canAbortSession: boolean;
   tokenBudget: Record<string, unknown> | null;
-  sendMessage: (message: unknown) => void;
+  sendMessage: (message: unknown) => boolean | void;
   /** Whether the chat socket is currently open; a side-question ask while it is not would send nothing and leave the optimistic entry pending forever. */
   isConnected?: boolean;
   sendByCtrlEnter?: boolean;
   /** From the capability matrix, like `supportsSideQuestions`: whether the provider can take a message into a running turn (`chat.steer`). Gates the send menu's Steer choice. */
   supportsSteering?: boolean;
+  /** Codex follow-up preference; an explicit menu choice overrides it for one send. */
+  codexSteerByDefault?: boolean;
+  /** Active Codex turn for the viewed session, if the server has started one. */
+  activeCodexTurnId?: string;
   onSessionProcessing?: MarkSessionProcessing;
   /**
    * Invoked with the freshly allocated session id when the user sends the
@@ -112,7 +117,7 @@ type SubmitOptions = {
   presetBackgroundChoice?: 'queue' | 'send';
   /**
    * The send menu's Steer row: while a turn runs, send the message into it
-   * (read at the agent's next tool call) instead of queueing it for after.
+   * instead of queueing it for after. An explicit false selects the queue.
    * Falls through to the ordinary send when no turn is running any more.
    */
   steerIntoTurn?: boolean;
@@ -273,6 +278,8 @@ export function useChatComposerState({
   supportsSideQuestions = false,
   sendByCtrlEnter,
   supportsSteering = false,
+  codexSteerByDefault = false,
+  activeCodexTurnId,
   onSessionProcessing,
   onSessionEstablished,
   onFileOpen,
@@ -408,11 +415,9 @@ export function useChatComposerState({
   // session while `queuedDraft` still holds the old session's draft.
   const queuedDraftSessionRef = useRef<string | null>(sessionKey);
 
-  // Messages this tab sent into a running turn that the agent has not read
-  // yet. Each is a card above the composer until its echo reaches the
-  // transcript; the run ending without it puts the text back in the composer,
-  // and a refusal (the turn had already ended) queues it as the next turn.
-  const [pendingSteers, setPendingSteers] = useState<PendingSteer[]>([]);
+  // A card above the composer holds each message until its echo is seen.
+  // Codex messages can also be recovered and reconciled after a tab refresh.
+  const [pendingSteers, setPendingSteers] = useState<PendingSteer[]>(readPendingCodexSteers);
   // Read by the outcome handler, which the realtime listener calls between
   // renders: a refusal can follow an acceptance before React re-renders.
   // Written only through `updatePendingSteers` below, with the state.
@@ -901,7 +906,11 @@ export function useChatComposerState({
   // steered message refused because its turn had ended — so whatever the user
   // has typed since stays where it is.
   const queueMessage = useCallback(
-    async (durableDraft: QueuedDraft, queuedSessionKey: string | null, { fromComposer = true } = {}) => {
+    async (
+      durableDraft: QueuedDraft,
+      queuedSessionKey: string | null,
+      { fromComposer = true, trackUncertainResult = false } = {},
+    ): Promise<'queued' | 'unread' | 'queue-unknown' | undefined> => {
       const queuedFromOpenComposer = fromComposer
         && (!queuedSessionKey || sessionKeyRef.current === queuedSessionKey);
       // Attachments are not kept per chat: the queued ones leave even when another chat is
@@ -945,6 +954,12 @@ export function useChatComposerState({
             options: queuedMessage.options,
           };
         } catch (error) {
+          if (trackUncertainResult) {
+            // A network failure can occur after the server accepted the append.
+            // Only an explicit client error can safely put the input back.
+            return error instanceof ApiRequestError && error.status >= 400
+              && error.status < 500 && error.status !== 408 ? 'unread' : 'queue-unknown';
+          }
           const message = error instanceof Error ? error.message : 'Unknown error';
           console.error('Failed to queue message:', error);
           addMessage({
@@ -986,7 +1001,7 @@ export function useChatComposerState({
       // sessions meanwhile, the durable record is already enough; do not
       // attach its UI card to the newly opened composer.
       if (queuedSessionKey && sessionKeyRef.current !== queuedSessionKey) {
-        return;
+        return 'queued';
       }
 
       queuedDraftSessionRef.current = queuedSessionKey;
@@ -999,6 +1014,7 @@ export function useChatComposerState({
           ? [...previous.attachments, ...queuedCard.attachments]
           : queuedCard.attachments,
       }));
+      return 'queued';
     },
     [addMessage, recordSentMessage, resetCommandMenuState, setInput, t],
   );
@@ -1008,36 +1024,56 @@ export function useChatComposerState({
   const updatePendingSteers = useCallback((update: (current: PendingSteer[]) => PendingSteer[]) => {
     const next = update(pendingSteersRef.current);
     pendingSteersRef.current = next;
+    writePendingCodexSteers(next);
     setPendingSteers(next);
   }, []);
 
+  const getPendingSteerIds = useCallback((sessionId: string) => (
+    pendingSteersRef.current
+      .filter((steer) => steer.expectedTurnId && steer.sessionKey === sessionId
+        && !['unsent', 'queueing', 'queue-unknown'].includes(steer.status))
+      .map((steer) => steer.messageId)
+  ), []);
+
   // Sends a message into the session's running turn (`chat.steer`): the agent
-  // reads it at its next tool call, without the turn stopping. It leaves the
-  // composer at once, as a sent message does, and waits as a card until the
-  // agent reads it. Attachments must already be uploaded.
+  // reads it during the turn. It leaves the composer and waits as a card
+  // until the agent reads it. Attachments must already be uploaded.
   const steerIntoRunningTurn = useCallback(
-    (message: { content: string; attachments: File[]; uploadedAttachments: unknown[] }, steerSessionKey: string) => {
+    (message: { content: string; attachments: File[]; uploadedAttachments: unknown[] }, steerSessionKey: string, expectedTurnId?: string) => {
       const messageId = createSteerMessageId();
       updatePendingSteers((current) => [...current, {
         messageId,
         sessionKey: steerSessionKey,
+        expectedTurnId,
         content: message.content,
         attachments: message.attachments,
         uploadedAttachments: message.uploadedAttachments,
         status: 'sending',
       }]);
-      sendMessage({
+      const sent = sendMessage({
         type: 'chat.steer',
         sessionId: steerSessionKey,
         messageId,
+        ...(expectedTurnId ? { expectedTurnId } : {}),
         content: message.content,
         options: { attachments: message.uploadedAttachments },
       });
+      if (expectedTurnId && sent === false) {
+        // The socket never took this frame. Keep the draft and remember the
+        // uploaded files in case the tab reloads before it can restore them.
+        const draftText = sessionKeyRef.current === steerSessionKey
+          ? inputValueRef.current : readDraftText(steerSessionKey);
+        writeDraftText(steerSessionKey, draftText, { preserveUntilSaved: true });
+        updatePendingSteers((current) => current.map((steer) => (
+          steer.messageId === messageId ? { ...steer, status: 'unsent' } : steer
+        )));
+        return;
+      }
       recordSentMessage(message.content, steerSessionKey);
       // Attachments are not kept per chat: the steered ones leave even when another chat is open now.
       setAttachedFiles((files) => files.filter((file) => !message.attachments.includes(file)));
 
-      if (sessionKeyRef.current === steerSessionKey) {
+      if (sessionKeyRef.current === steerSessionKey && (!expectedTurnId || inputValueRef.current === message.content)) {
         setInput('');
         inputValueRef.current = '';
         setFileErrors(new Map());
@@ -1047,12 +1083,12 @@ export function useChatComposerState({
           textareaRef.current.style.height = 'auto';
         }
         if (draftScopeRef.current) {
-          writeDraftText(draftScopeRef.current, '');
+          writeDraftText(draftScopeRef.current, '', { preserveUntilSaved: Boolean(expectedTurnId) });
         }
-      } else if (readDraftText(steerSessionKey) === message.content) {
+      } else if (sessionKeyRef.current !== steerSessionKey && readDraftText(steerSessionKey) === message.content) {
         // The user changed sessions during the upload; the composer they left
         // must not still hold the message as its draft.
-        writeDraftText(steerSessionKey, '');
+        writeDraftText(steerSessionKey, '', { preserveUntilSaved: Boolean(expectedTurnId) });
       }
     },
     [recordSentMessage, resetCommandMenuState, sendMessage, setInput, updatePendingSteers],
@@ -1063,38 +1099,104 @@ export function useChatComposerState({
    * ChatInterface, which hands it to the realtime handler.
    */
   const handleSteerOutcome = useCallback(
-    (_sessionId: string, messageId: string, outcome: SteerOutcome) => {
+    (sessionId: string, messageId: string, outcome: SteerOutcome) => {
+      const steer = pendingSteersRef.current.find((candidate) => (
+        candidate.sessionKey === sessionId && (outcome === 'delivered'
+          ? isEchoOfSteer(messageId, candidate.messageId)
+          : candidate.messageId === messageId)
+      ));
+      if (!steer) return;
+      if (steer.status === 'queueing' || steer.status === 'queue-unknown' || steer.status === 'unsent') return;
       if (outcome === 'delivered') {
-        if (pendingSteersRef.current.some((steer) => isEchoOfSteer(messageId, steer.messageId))) {
-          updatePendingSteers((current) => current.filter((steer) => !isEchoOfSteer(messageId, steer.messageId)));
-        }
+        updatePendingSteers((current) => current.filter((candidate) => candidate !== steer));
         return;
       }
 
-      const steer = pendingSteersRef.current.find((candidate) => candidate.messageId === messageId);
-      if (!steer) {
-        return;
-      }
-      if (outcome === 'accepted') {
+      if (outcome !== 'refused') {
+        // An evicted status or a late acceptance cannot undo a proven unread result.
+        if (steer.status === 'unread' || steer.status === outcome) return;
         updatePendingSteers((current) => current.map((candidate) => (
-          candidate.messageId === messageId ? { ...candidate, status: 'accepted' } : candidate
+          candidate === steer ? { ...candidate, status: outcome } : candidate
         )));
         return;
       }
 
       // Refused: the turn had already ended when it arrived. The user meant it
-      // for this conversation now, so it goes out as the next turn — the
-      // queue sends it as soon as the session is idle, which it about is.
-      updatePendingSteers((current) => current.filter((candidate) => candidate.messageId !== messageId));
+      // for this conversation now, so send it as the next turn.
+      const trackUncertainResult = Boolean(steer.expectedTurnId);
+      updatePendingSteers((current) => trackUncertainResult
+        ? current.map((candidate) => candidate === steer ? { ...candidate, status: 'queueing' } : candidate)
+        : current.filter((candidate) => candidate !== steer));
       void queueMessage({
         content: steer.content,
         attachments: steer.attachments,
         uploadedAttachments: steer.uploadedAttachments,
         options: buildSendOptions(steer.content),
-      }, steer.sessionKey, { fromComposer: false });
+      }, steer.sessionKey, { fromComposer: false, trackUncertainResult }).then((result) => {
+        if (!trackUncertainResult) return;
+        updatePendingSteers((current) => current.flatMap((candidate) => {
+          if (candidate.messageId !== messageId) return [candidate];
+          if (result === 'queued') return [];
+          return [{ ...candidate, status: result === 'unread' ? 'unread' : 'queue-unknown' }];
+        }));
+      });
     },
     [buildSendOptions, queueMessage, updatePendingSteers],
   );
+
+  const restoreSteers = useCallback((unread: PendingSteer[], files: File[]) => {
+    const draft = inputValueRef.current;
+    const recovered = unread.filter((steer) => steer.status !== 'unsent' || steer.content !== draft);
+    const restored = [...recovered.map((steer) => steer.content), draft]
+      .filter((part) => part.trim())
+      .join('\n\n');
+    setInput(restored);
+    inputValueRef.current = restored;
+    setAttachedFiles((current) => [...files.filter((file) => !current.includes(file)), ...current]);
+    if (sessionKey) writeDraftText(sessionKey, restored, {
+      preserveUntilSaved: unread.some((steer) => Boolean(steer.expectedTurnId)),
+    });
+    const ids = new Set(unread.map((steer) => steer.messageId));
+    updatePendingSteers((current) => current.filter((steer) => !ids.has(steer.messageId)));
+  }, [sessionKey, setInput, updatePendingSteers]);
+
+  // Codex confirms unread explicitly. After a reload, retrieve the original
+  // attachment bytes through the same asset API used by the transcript.
+  useEffect(() => {
+    const unread = pendingSteers.filter((steer) => steer.sessionKey === sessionKey
+      && (steer.status === 'unread' || steer.status === 'unsent'));
+    if (unread.length === 0 || !isConnected) return;
+    let cancelled = false;
+    const restore = async () => {
+      try {
+        const files = await Promise.all(unread.flatMap<File | Promise<File>>((steer) => steer.attachments.length
+          ? steer.attachments
+          : steer.uploadedAttachments.map(async (descriptor) => {
+            const { path, name, mimeType } = descriptor as ChatAttachment;
+            const storedName = path?.split(/[\\/]/).pop();
+            if (!storedName) throw new Error('Missing stored attachment name');
+            const response = await api.assets.file(storedName);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const blob = await response.blob();
+            return new File([blob], name || storedName, { type: mimeType || blob.type });
+          })));
+        if (!cancelled && sessionKeyRef.current === sessionKey) {
+          restoreSteers(unread, files);
+        }
+      } catch (error) {
+        console.error('Failed to restore steered attachments:', error);
+      }
+    };
+    void restore();
+    return () => { cancelled = true; };
+  }, [isConnected, pendingSteers, restoreSteers, sessionKey]);
+
+  useEffect(() => {
+    if (isConnected || !pendingSteersRef.current.some((steer) => steer.expectedTurnId && steer.status === 'sending')) return;
+    updatePendingSteers((current) => current.map((steer) => (
+      steer.expectedTurnId && steer.status === 'sending' ? { ...steer, status: 'unknown' } : steer
+    )));
+  }, [isConnected, updatePendingSteers]);
 
   // The run ended with a steered message the server took but the agent never
   // read — the user stopped the run, or it failed. Nothing will send it now,
@@ -1108,26 +1210,19 @@ export function useChatComposerState({
       return;
     }
     const unread = pendingSteersRef.current.filter(
-      (steer) => steer.sessionKey === sessionKey && steer.status === 'accepted',
+      (steer) => !steer.expectedTurnId && steer.sessionKey === sessionKey && steer.status === 'accepted',
     );
     if (unread.length === 0) {
       return;
     }
-    updatePendingSteers((current) => current.filter((steer) => !unread.includes(steer)));
-    const restored = [...unread.map((steer) => steer.content), inputValueRef.current]
-      .filter((part) => part.trim())
-      .join('\n\n');
-    setInput(restored);
-    inputValueRef.current = restored;
-    setAttachedFiles((current) => [...unread.flatMap((steer) => steer.attachments), ...current]);
-    writeDraftText(sessionKey, restored);
-  }, [isLoading, sessionKey, setInput, updatePendingSteers]);
+    restoreSteers(unread, unread.flatMap((steer) => steer.attachments));
+  }, [isLoading, restoreSteers, sessionKey]);
 
-  // Cards belong to the session they were sent into; switching away drops
-  // them (the messages themselves are already the run's, on the server).
+  // Keep Codex records across session switches so they can be reconciled when
+  // the user returns. The legacy Claude cards follow the open composer.
   useEffect(() => {
-    if (pendingSteersRef.current.some((steer) => steer.sessionKey !== sessionKey)) {
-      updatePendingSteers((current) => current.filter((steer) => steer.sessionKey === sessionKey));
+    if (pendingSteersRef.current.some((steer) => !steer.expectedTurnId && steer.sessionKey !== sessionKey)) {
+      updatePendingSteers((current) => current.filter((steer) => steer.expectedTurnId || steer.sessionKey === sessionKey));
     }
   }, [sessionKey, updatePendingSteers]);
 
@@ -1194,10 +1289,17 @@ export function useChatComposerState({
         // Steering sends the message into the running turn instead of after
         // it, when the send menu asked for that and the provider can take it.
         // A slash command is a turn of its own, so it always waits in the queue.
-        const steersIntoTurn = submitOptions?.steerIntoTurn === true
+        const expectedTurnId = provider === 'codex' ? activeCodexTurnId : undefined;
+        const wantsSteer = submitOptions?.steerIntoTurn ?? (provider === 'codex' && codexSteerByDefault);
+        const steersIntoTurn = wantsSteer
           && supportsSteering
           && Boolean(sessionKey)
-          && !currentInput.trimStart().startsWith('/');
+          && !currentInput.trimStart().startsWith('/')
+          && (provider !== 'codex' || Boolean(expectedTurnId));
+        if (steersIntoTurn && provider === 'codex' && !isConnected && sessionKey) {
+          writeDraftText(sessionKey, currentInput, { preserveUntilSaved: true });
+          return;
+        }
         const queuedOptions = buildSendOptions(currentInput);
         const queuedSessionKey = sessionKey;
         let uploadedAttachments: unknown[] = [];
@@ -1219,7 +1321,7 @@ export function useChatComposerState({
             content: currentInput,
             attachments: currentAttachments,
             uploadedAttachments,
-          }, queuedSessionKey);
+          }, queuedSessionKey, expectedTurnId);
           return;
         }
 
@@ -1475,6 +1577,9 @@ export function useChatComposerState({
       slashCommands,
       steerIntoRunningTurn,
       supportsSteering,
+      activeCodexTurnId,
+      codexSteerByDefault,
+      isConnected,
       t,
     ],
   );
@@ -1523,7 +1628,10 @@ export function useChatComposerState({
         await handleSubmit(createFakeSubmitEvent(), undefined, { steerIntoTurn: true });
         return;
       }
-      await handleSubmit(createFakeSubmitEvent(), undefined, { presetBackgroundChoice: choice });
+      await handleSubmit(createFakeSubmitEvent(), undefined, {
+        presetBackgroundChoice: choice,
+        steerIntoTurn: false,
+      });
     },
     [askSideQuestionAndClear, handleSubmit, sessionKey],
   );
@@ -1926,6 +2034,7 @@ export function useChatComposerState({
     deleteQueuedDraft,
     pendingSteers: visiblePendingSteers,
     handleSteerOutcome,
+    getPendingSteerIds,
     handleVoiceTranscript,
     handleInputChange,
     handleKeyDown,

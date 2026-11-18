@@ -171,6 +171,7 @@
     "send": "Send",
     "stop": "Stop",
     "hintText": {
+      "steer": "{{shortcut}} to steer the current turn",
       "ctrlEnter": "Ctrl+Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands",
       "enter": "Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands",
       "queue": "Enter to queue your next message",
@@ -190,6 +191,11 @@
       "delete": "Delete queued message"
     },
     "steer": {
+      "codexAccepted": "Accepted by Codex",
+      "unknown": "Awaiting delivery confirmation",
+      "unread": "Unread. Restoring draft…",
+      "queueing": "Adding to the queue…",
+      "queueUnknown": "Awaiting queue confirmation",
       "label": "Steering",
       "sending": "Sending…",
       "willRead": "{{provider}} reads it at its next tool call",
@@ -277,6 +283,7 @@
     },
     "steer": {
       "label": "Steer",
+      "codexDescription": "Add this message to the current Codex turn",
       "description": "Send into this turn; read at the next tool call"
     },
     "sideQuestion": {

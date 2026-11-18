@@ -135,6 +135,7 @@
     "send": "发送",
     "stop": "停止",
     "hintText": {
+      "steer": "{{shortcut}} 引导当前轮次",
       "ctrlEnter": "Ctrl+Enter 发送 • Shift+Enter 换行 • Tab 切换模式 • / 斜杠命令",
       "enter": "Enter 发送 • Shift+Enter 换行 • Tab 切换模式 • / 斜杠命令",
       "queue": "Enter 排队发送下一条消息",
@@ -144,6 +145,17 @@
     "showAllCommands": "显示所有命令",
     "clearInput": "清空输入",
     "scrollToBottom": "滚动到底部",
+    "steer": {
+      "codexAccepted": "Codex 已接受",
+      "unknown": "等待确认是否送达",
+      "unread": "尚未送达，正在恢复草稿…",
+      "queueing": "正在加入队列…",
+      "queueUnknown": "等待确认是否已排队",
+      "label": "引导中",
+      "sending": "正在发送…",
+      "willRead": "{{provider}} 将在下次调用工具时读取",
+      "attachments_other": "已附加 {{count}} 个文件"
+    },
     "queue": {
       "sendNext": "排队发送下一条消息",
       "append": "添加到排队消息",
@@ -192,6 +204,31 @@
       "loadingAll": "正在加载全部消息...",
       "allLoaded": "全部消息已加载",
       "perfWarning": "已加载全部消息 - 滚动可能变慢。点击「滚动到底部」恢复性能。"
+    }
+  },
+  "sendMenu": {
+    "trigger": "发送选项",
+    "queue": {
+      "label": "排队",
+      "descriptionResponding": "当前轮结束后发送",
+      "descriptionBackground": "后台任务结束后发送"
+    },
+    "steer": {
+      "label": "引导",
+      "description": "发送到当前轮，在下次工具调用时读取",
+      "codexDescription": "将此消息追加到当前 Codex 轮次"
+    },
+    "sideQuestion": {
+      "label": "旁路提问",
+      "description": "单独提问，当前会话不会收到"
+    },
+    "stop": {
+      "label": "停止",
+      "description": "结束当前回复"
+    },
+    "sendAnyway": {
+      "label": "立即发送",
+      "description": "立即发送并停止后台任务"
     }
   },
   "shell": {

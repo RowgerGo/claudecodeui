@@ -101,6 +101,8 @@ type ChatComposerProps = {
   supportsSideQuestions?: boolean;
   /** Whether the provider can take a message into a running turn; gates the send menu's Steer row the same way `supportsSideQuestions` gates its row. */
   supportsSteering?: boolean;
+  codexSteerByDefault?: boolean;
+  isCodex?: boolean;
   /** Messages sent into the running turn that the agent has not read yet, each shown as a card above the composer until its echo lands in the transcript. */
   pendingSteers?: PendingSteer[];
   attachedFiles: File[];
@@ -183,6 +185,8 @@ export default function ChatComposer({
   onSendMenuChoice,
   supportsSideQuestions,
   supportsSteering = false,
+  codexSteerByDefault = false,
+  isCodex = false,
   pendingSteers = NO_PENDING_STEERS,
   attachedFiles,
   onRemoveAttachment,
@@ -285,10 +289,13 @@ export default function ChatComposer({
   const hasQueuedDraft = Boolean(queuedDraft);
   const hasAnyInput = Boolean(input.trim() || attachedFiles.length > 0);
   const canQueueDraft = isLoading && hasAnyInput;
+  const canSteerInput = supportsSteering && (!isCodex || !input.trimStart().startsWith('/'));
   const submitHint = canQueueDraft
-    ? hasQueuedDraft
-      ? t('input.hintText.appendQueued', { defaultValue: 'Enter to add to the queued message' })
-      : t('input.hintText.queue', { defaultValue: 'Enter to queue your next message' })
+    ? isCodex && canSteerInput && codexSteerByDefault
+      ? t('input.hintText.steer', { shortcut: sendByCtrlEnter ? 'Ctrl+Enter' : 'Enter' })
+      : hasQueuedDraft
+        ? t('input.hintText.appendQueued', { defaultValue: 'Enter to add to the queued message' })
+        : t('input.hintText.queue', { defaultValue: 'Enter to queue your next message' })
     : sendByCtrlEnter
       ? t('input.hintText.ctrlEnter')
       : t('input.hintText.enter');
@@ -567,7 +574,9 @@ export default function ChatComposer({
                 hasText={Boolean(input.trim())}
                 canAbortSession={canAbortSession}
                 supportsSideQuestions={supportsSideQuestions}
-                supportsSteering={supportsSteering}
+                supportsSteering={canSteerInput}
+                codexSteerByDefault={codexSteerByDefault}
+                isCodex={isCodex}
                 sendByCtrlEnter={sendByCtrlEnter}
                 onSelect={(choice) => {
                   if (choice === 'stop') {

@@ -126,6 +126,7 @@
     "send": "傳送",
     "stop": "停止",
     "hintText": {
+      "steer": "{{shortcut}} 引導當前輪次",
       "ctrlEnter": "Ctrl+Enter 傳送 • Shift+Enter 換行 • Tab 切換模式 • / 斜線指令",
       "enter": "Enter 傳送 • Shift+Enter 換行 • Tab 切換模式 • / 斜線指令",
       "appendQueued": "Enter 加入排隊訊息"
@@ -134,6 +135,17 @@
     "showAllCommands": "顯示所有指令",
     "clearInput": "清空輸入",
     "scrollToBottom": "捲動到底部",
+    "steer": {
+      "codexAccepted": "Codex 已接受",
+      "unknown": "等待確認是否送達",
+      "unread": "尚未送達，正在恢復草稿…",
+      "queueing": "正在加入佇列…",
+      "queueUnknown": "等待確認是否已排隊",
+      "label": "引導中",
+      "sending": "正在傳送…",
+      "willRead": "{{provider}} 將在下次呼叫工具時讀取",
+      "attachments_other": "已附加 {{count}} 個檔案"
+    },
     "queue": {
       "append": "加入排隊訊息",
       "notCombinable": "無法將訊息加入排隊：斜線指令會單獨執行，因此無法與排隊訊息合併。請在排隊訊息送出後再傳送。"
@@ -212,6 +224,31 @@
       "loadingAll": "正在載入全部訊息...",
       "allLoaded": "全部訊息已載入",
       "perfWarning": "已載入全部訊息 - 捲動可能變慢。點擊「捲動到底部」恢復效能。"
+    }
+  },
+  "sendMenu": {
+    "trigger": "傳送選項",
+    "queue": {
+      "label": "排隊",
+      "descriptionResponding": "當前輪次結束後傳送",
+      "descriptionBackground": "背景工作結束後傳送"
+    },
+    "steer": {
+      "label": "引導",
+      "description": "傳送至當前輪次，於下次呼叫工具時讀取",
+      "codexDescription": "將此訊息加入當前 Codex 輪次"
+    },
+    "sideQuestion": {
+      "label": "側邊提問",
+      "description": "獨立提問，目前工作階段不會收到"
+    },
+    "stop": {
+      "label": "停止",
+      "description": "結束當前回覆"
+    },
+    "sendAnyway": {
+      "label": "立即傳送",
+      "description": "立即傳送並停止背景工作"
     }
   },
   "shell": {

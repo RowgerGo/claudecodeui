@@ -42,11 +42,9 @@ it.
    row count stays flat while the text grows. `finalizeStreaming` rewrites that same array
    slot — new id, `kind: 'text'`, `role: 'assistant'` — so React reconciles instead of
    remounting.
-4. **Whether you see deltas at all depends on the provider.** Cursor streams; Claude,
-   Codex and OpenCode do not. Claude's live prose arrives as complete `text` rows, one per
-   assistant message, and OpenCode's as one `text` row per finished text part. Code that
-   assumes "assistant reply implies `stream_delta`" is wrong for most providers, the
-   default one included.
+4. **Providers stream through different event shapes.** Cursor emits `stream_delta`.
+   Codex App Server updates a `text` row with the same item ID as the reply grows.
+   Claude sends complete `text` rows, and OpenCode sends one per finished text part.
 5. **`complete` is the only terminal event. `error` is just a row.** Providers emit
    `error` for mid-run stderr and keep running. Clearing the busy state on `error` leaves
    a live run writing into a UI that believes it is idle.
@@ -109,7 +107,7 @@ sequenceDiagram
     GW->>CLI: runtime.run with the app session id
     CLI-->>REG: session_created announcing the provider-native id
     Note over REG: swallowed and recorded, never forwarded
-    CLI-->>REG: text rows for Claude, Codex and OpenCode, stream_delta for Cursor
+    CLI-->>REG: text rows for Claude and OpenCode, item snapshots for Codex, stream_delta for Cursor
     REG-->>WSC: sessionId rewritten to the app id, seq stamped, buffered
     WSC-->>UI: dispatched to every listener
     CLI-->>REG: tool_use carrying a toolId
@@ -148,7 +146,7 @@ reload can make the transcript look completely different from what streamed.
 
 | Kind | Claude | Codex | Cursor | OpenCode |
 | --- | --- | --- | --- | --- |
-| `text` | yes, whole assistant messages | yes | history only | yes, one per finished `text` part |
+| `text` | yes, whole assistant messages | yes, assistant item updates and user steer echoes | history only | yes, one per finished `text` part |
 | `stream_delta` | **no** | **no** | yes, one per assistant chunk | **no** |
 | `stream_end` | **no** | **no** | **never** | yes, from `step-finish` parts |
 | `thinking` | yes | yes | history only | yes, from finished `reasoning` parts |

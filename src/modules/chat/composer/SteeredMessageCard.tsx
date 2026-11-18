@@ -17,6 +17,17 @@ type SteeredMessageCardProps = {
 export default function SteeredMessageCard({ steer, providerLabel }: SteeredMessageCardProps) {
   const { t } = useTranslation('chat');
   const attachmentCount = steer.uploadedAttachments.length || steer.attachments.length;
+  const statusText = {
+    sending: t('input.steer.sending', { defaultValue: 'Sending…' }),
+    accepted: steer.expectedTurnId
+      ? t('input.steer.codexAccepted')
+      : t('input.steer.willRead', { provider: providerLabel, defaultValue: '{{provider}} reads it at its next tool call' }),
+    unknown: t('input.steer.unknown'),
+    unread: t('input.steer.unread'),
+    unsent: t('input.steer.unread'),
+    queueing: t('input.steer.queueing'),
+    'queue-unknown': t('input.steer.queueUnknown'),
+  }[steer.status];
 
   return (
     <div className="settings-content-enter mx-auto mb-2 max-w-[54.25rem] rounded-xl rounded-t-none border border-primary/30 bg-primary/[0.06] px-3 py-2">
@@ -26,11 +37,7 @@ export default function SteeredMessageCard({ steer, providerLabel }: SteeredMess
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-primary/80">
             <span>{t('input.steer.label', { defaultValue: 'Steering' })}</span>
-            <span className="normal-case text-muted-foreground/70" role="status">
-              · {steer.status === 'sending'
-                ? t('input.steer.sending', { defaultValue: 'Sending…' })
-                : t('input.steer.willRead', { provider: providerLabel, defaultValue: '{{provider}} reads it at its next tool call' })}
-            </span>
+            <span className="normal-case text-muted-foreground/70" role="status">· {statusText}</span>
           </div>
           <p className="mt-0.5 max-h-28 overflow-y-auto whitespace-pre-wrap break-words text-sm text-foreground/90">
             {steer.content}

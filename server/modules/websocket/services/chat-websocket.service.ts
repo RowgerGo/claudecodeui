@@ -591,16 +591,9 @@ async function handleChatEditSend(
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Handles `chat.steer`: delivers a message into the session's running turn
- * instead of starting a new one. The model reads it at its next tool-call
- * boundary and carries on; the provider echoes it on the run's stream at that
- * moment, which is how every attached tab learns it was read. The sender gets
- * `chat_steer_accepted` once the provider has taken it.
- *
- * Refused with `STEER_UNAVAILABLE` (naming the `messageId`) when no turn can
- * take it: the run has ended, its turn has already been reported complete, or
- * the provider cannot write into a running turn. The client then sends the
- * message the ordinary way, so nothing typed is lost to the race.
+ * Delivers a follow-up to the running turn. For Codex the browser names the
+ * precise turn it observed, and the run records the outcome by message id.
+ * Claude retains its existing acknowledgement and explicit refusal frames.
  */
 async function handleChatSteer(
   ws: WebSocket,
@@ -614,6 +607,13 @@ async function handleChatSteer(
 
   const { sessionId, provider } = resolved;
   const requestedId = typeof data.messageId === 'string' ? data.messageId.trim() : '';
+  const expectedTurnId = typeof data.expectedTurnId === 'string' ? data.expectedTurnId.trim() : '';
+  if (provider === 'codex' && (!UUID_PATTERN.test(requestedId) || !expectedTurnId)) {
+    sendProtocolError(ws, 'STEER_TARGET_REQUIRED', 'Codex steering requires a turn id and message UUID.', sessionId, {
+      messageId: requestedId,
+    });
+    return;
+  }
   const messageId = UUID_PATTERN.test(requestedId) ? requestedId : randomUUID();
   const content = typeof data.content === 'string' ? data.content : '';
   const clientOptions = (data.options ?? {}) as AnyRecord;
@@ -624,14 +624,27 @@ async function handleChatSteer(
     return;
   }
 
-  const run = chatRunRegistry.getRun(sessionId);
-  const steered = run?.status === 'running'
-    ? await dependencies.runtime.steer(provider, sessionId, content, {
-      images: attachments.filter(isImageAttachmentDescriptor),
-      files: attachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
+  const runtimeOptions = {
+    images: attachments.filter(isImageAttachmentDescriptor),
+    files: attachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
+    messageId,
+  };
+  if (provider === 'codex') {
+    const outcome = await chatRunRegistry.steerCodex({
+      appSessionId: sessionId,
+      turnId: expectedTurnId,
       messageId,
-    })
-    : false;
+      connection: ws,
+      deliver: () => dependencies.runtime.steer(provider, sessionId, content, { ...runtimeOptions, expectedTurnId }),
+    });
+    if (outcome) {
+      sendJson(ws, { kind: 'chat_steer_status', sessionId, messageId, outcome, timestamp: new Date().toISOString() });
+    }
+    return;
+  }
+
+  const steered = chatRunRegistry.isProcessing(sessionId)
+    && await dependencies.runtime.steer(provider, sessionId, content, runtimeOptions);
 
   if (!steered) {
     sendProtocolError(
@@ -756,6 +769,7 @@ function handleChatSubscribe(
   dependencies: ChatWebSocketDependencies
 ): void {
   const targets = Array.isArray(data.sessions) ? data.sessions : [];
+  const codexSessions = new Set<string>();
 
   for (const target of targets) {
     if (!target || typeof target !== 'object') {
@@ -775,7 +789,19 @@ function handleChatSubscribe(
       : 0;
 
     const run = chatRunRegistry.getRun(sessionId);
+    if ((run?.provider ?? sessionsDb.getSessionById(sessionId)?.provider) === 'codex') {
+      codexSessions.add(sessionId);
+    }
     const isProcessing = chatRunRegistry.isProcessing(sessionId);
+    const turnId = isProcessing ? run?.turnId ?? null : null;
+    const requestedSteerIds = (target as AnyRecord).pendingSteerIds;
+    const steerOutcomes = Array.isArray(requestedSteerIds)
+      ? requestedSteerIds.filter((id): id is string => typeof id === 'string' && UUID_PATTERN.test(id))
+        .map((messageId) => ({
+          messageId,
+          outcome: chatRunRegistry.getSteerOutcome(sessionId, messageId) ?? 'unknown',
+        }))
+      : undefined;
 
     // Future live events for this run should land on the socket that asked —
     // this is what makes mid-stream page refreshes work for all providers.
@@ -796,6 +822,8 @@ function handleChatSubscribe(
       sessionId,
       isProcessing,
       lastSeq: run?.lastSeq ?? 0,
+      turnId,
+      steerOutcomes,
       pendingPermissions,
       timestamp: new Date().toISOString(),
     });
@@ -805,11 +833,14 @@ function handleChatSubscribe(
     // replaying them (e.g. after a page reload where the client's lastSeq is
     // 0) would duplicate messages the history fetch already returned.
     if (isProcessing) {
-      for (const event of chatRunRegistry.replayEvents(sessionId, lastSeq)) {
+      const lastTurnId = (target as AnyRecord).lastTurnId;
+      const replayAfter = run?.provider === 'codex' && (turnId === null || lastTurnId !== turnId) ? 0 : lastSeq;
+      for (const event of chatRunRegistry.replayEvents(sessionId, replayAfter)) {
         sendJson(ws, event);
       }
     }
   }
+  chatRunRegistry.setCodexSubscriptions(ws, codexSessions);
 }
 
 /**
@@ -836,10 +867,10 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
  * Inbound protocol (client to server):
  * - `chat.send`                { sessionId, content, options? }
  * - `chat.side_question`       { sessionId, sideQuestionId, question, options?: { model? } }
- * - `chat.steer`               { sessionId, messageId, content, options? }
+ * - `chat.steer`               { sessionId, messageId, content, expectedTurnId?, options? }
  * - `chat.abort`               { sessionId }
  * - `chat.stop-task`           { sessionId, taskId }
- * - `chat.subscribe`           { sessions: [{ sessionId, lastSeq? }] }
+ * - `chat.subscribe`           { sessions: [{ sessionId, lastSeq?, lastTurnId?, pendingSteerIds? }] }
  * - `chat.permission-response` { requestId, allow, updatedInput?, message?, rememberEntry? }
  *
  * Outbound protocol (server to client): every frame is `kind`-based — either
@@ -971,5 +1002,6 @@ export function handleChatConnection(
   ws.on('close', () => {
     console.log('[INFO] Chat client disconnected');
     connectedClients.delete(ws);
+    chatRunRegistry.removeCodexSubscriptions(ws);
   });
 }

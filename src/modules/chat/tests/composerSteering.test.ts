@@ -24,6 +24,7 @@ const SESSION: ProjectSession = { id: 'session-1' };
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 let queued: Map<string, StoredQueued>;
+let appendQueue: ((entry: StoredQueued) => Promise<Response>) | undefined;
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
   status,
@@ -36,6 +37,9 @@ const fakeServer = async (url: RequestInfo | URL, init?: RequestInit): Promise<R
   const method = init?.method ?? 'GET';
   const body = init?.body && typeof init.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : {};
 
+  if (path.endsWith('/api/assets/files/notes.txt') && method === 'GET') {
+    return new Response('stored text', { headers: { 'Content-Type': 'text/plain' } });
+  }
   if (path.includes('/api/assets/files')) {
     const form = init?.body instanceof FormData ? init.body : new FormData();
     const files = form.getAll('files') as File[];
@@ -43,6 +47,7 @@ const fakeServer = async (url: RequestInfo | URL, init?: RequestInit): Promise<R
   }
   if (path.endsWith('/api/user/drafts/queued-message') && method === 'POST') {
     const message = body.queuedMessage as StoredQueued;
+    if (appendQueue) return appendQueue(message);
     const queuedMessage = { content: message.content, options: message.options, attachments: message.attachments ?? [] };
     queued.set(String(body.scope), queuedMessage);
     return json({ success: true, queuedMessage, appended: false });
@@ -53,16 +58,24 @@ const fakeServer = async (url: RequestInfo | URL, init?: RequestInit): Promise<R
   return json([]);
 };
 
-type Props = { isLoading: boolean; supportsSteering: boolean };
+type Props = {
+  isLoading: boolean;
+  supportsSteering: boolean;
+  provider?: 'claude' | 'codex';
+  activeCodexTurnId?: string;
+  codexSteerByDefault?: boolean;
+  isConnected?: boolean;
+  disconnectedAtSend?: boolean;
+};
 
 const render = (initialProps: Partial<Props> = {}) => {
   const sent: Array<Record<string, unknown>> = [];
   const view = renderHook(
-    ({ isLoading, supportsSteering }: Props) => useChatComposerState({
+    ({ isLoading, supportsSteering, provider = 'claude', activeCodexTurnId, codexSteerByDefault, isConnected, disconnectedAtSend }: Props) => useChatComposerState({
       selectedProject: PROJECT,
       selectedSession: SESSION,
       currentSessionId: SESSION.id ?? null,
-      provider: 'claude',
+      provider,
       permissionMode: 'default',
       cyclePermissionMode: () => undefined,
       resolvePermissionModeForProvider: () => 'default' as PermissionMode,
@@ -71,8 +84,15 @@ const render = (initialProps: Partial<Props> = {}) => {
       isLoading,
       canAbortSession: true,
       tokenBudget: null,
-      sendMessage: (message) => { sent.push(message as Record<string, unknown>); },
+      sendMessage: (message) => {
+        if (disconnectedAtSend) return false;
+        sent.push(message as Record<string, unknown>);
+        return true;
+      },
       supportsSteering,
+      activeCodexTurnId,
+      codexSteerByDefault,
+      isConnected,
       scrollToBottom: () => undefined,
       addMessage: () => undefined,
       setIsUserScrolledUp: () => undefined,
@@ -110,8 +130,10 @@ const steerFrames = (sent: Array<Record<string, unknown>>) => sent.filter((frame
 
 beforeEach(async () => {
   queued = new Map();
+  appendQueue = undefined;
   resetChatDrafts();
   localStorage.clear();
+  sessionStorage.clear();
   vi.stubGlobal('fetch', vi.fn(fakeServer));
   await i18n.changeLanguage('en');
 });
@@ -120,6 +142,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   resetChatDrafts();
   localStorage.clear();
+  sessionStorage.clear();
 });
 
 test('Steer from the send menu sends the message into the running turn', async () => {
@@ -239,4 +262,115 @@ test('Steer chosen just as the turn ended sends the message as the next turn', a
 
   assert.equal(steerFrames(sent).length, 0);
   assert.equal(sent.filter((frame) => frame.type === 'chat.send').length, 1);
+});
+
+test('Codex defaults to queue and supports one-time steering into the specified turn', async () => {
+  const { view, sent } = render({ provider: 'codex', activeCodexTurnId: 'turn-1' });
+  await submit(view, 'queue me');
+  await steer(view, 'change your next step');
+  assert.equal(queued.get('session-1')?.content, 'queue me');
+  assert.equal(steerFrames(sent).length, 1);
+  assert.equal(steerFrames(sent)[0].expectedTurnId, 'turn-1');
+});
+
+test('Codex steers by default when enabled and Queue overrides it for one message', async () => {
+  const { view, sent } = render({ provider: 'codex', activeCodexTurnId: 'turn-1', codexSteerByDefault: true });
+  await submit(view, 'before override');
+  await act(async () => { view.result.current.setInput('queue this'); });
+  await act(async () => { await view.result.current.handleSendMenuChoice('queue'); });
+  await submit(view, 'after override');
+  assert.deepEqual(steerFrames(sent).map((frame) => frame.content), ['before override', 'after override']);
+  assert.equal(queued.get('session-1')?.content, 'queue this');
+});
+
+test('a disconnect just before a Codex steer leaves the draft and attachment intact', async () => {
+  const props = { provider: 'codex' as const, activeCodexTurnId: 'turn-1', disconnectedAtSend: true };
+  const { view, sent } = render(props);
+  await steer(view, 'keep this draft', [new File(['x'], 'notes.txt')]);
+  assert.equal(steerFrames(sent).length, 0);
+  assert.equal(view.result.current.input, 'keep this draft');
+  assert.equal(view.result.current.attachedFiles.length, 1);
+  assert.deepEqual(view.result.current.getPendingSteerIds('session-1'), []);
+  view.unmount();
+  assert.equal(render(props).view.result.current.input, 'keep this draft');
+});
+
+test('a Codex steer with a lost receipt survives refresh and is reconciled without resending', async () => {
+  const props = { provider: 'codex' as const, activeCodexTurnId: 'turn-1' };
+  const { view, sent } = render(props);
+  await steer(view, 'preserve my input');
+  const messageId = String(steerFrames(sent)[0].messageId);
+  view.unmount();
+
+  const reopened = render({ ...props, isLoading: false });
+  assert.deepEqual(reopened.view.result.current.getPendingSteerIds('session-1'), [messageId]);
+  assert.equal(reopened.view.result.current.pendingSteers[0]?.status, 'unknown');
+  act(() => reopened.view.result.current.handleSteerOutcome('session-1', messageId, 'unknown'));
+  assert.equal(reopened.view.result.current.pendingSteers[0]?.content, 'preserve my input');
+  assert.equal(steerFrames(reopened.sent).length, 0);
+  assert.equal(queued.size, 0);
+  act(() => reopened.view.result.current.handleSteerOutcome('session-1', messageId, 'delivered'));
+  assert.deepEqual(reopened.view.result.current.getPendingSteerIds('session-1'), []);
+});
+
+test('reloading during a refused steer fallback keeps the input and never retries the queue POST', async () => {
+  let releaseQueue: (response: Response) => void = () => undefined;
+  const queueAttempt = vi.fn(() => new Promise<Response>((resolve) => { releaseQueue = resolve; }));
+  appendQueue = queueAttempt;
+  const props = { provider: 'codex' as const, activeCodexTurnId: 'turn-1' };
+  const { view, sent } = render(props);
+  await steer(view, 'one fallback attempt');
+  const messageId = String(steerFrames(sent)[0].messageId);
+  act(() => view.result.current.handleSteerOutcome('session-1', messageId, 'refused'));
+  await vi.waitFor(() => assert.equal(queueAttempt.mock.calls.length, 1));
+  assert.equal(view.result.current.pendingSteers[0]?.status, 'queueing');
+  view.unmount();
+
+  const reopened = render({ ...props, isLoading: false });
+  assert.equal(reopened.view.result.current.pendingSteers[0]?.status, 'queue-unknown');
+  assert.equal(reopened.view.result.current.pendingSteers[0]?.content, 'one fallback attempt');
+  assert.deepEqual(reopened.view.result.current.getPendingSteerIds('session-1'), []);
+  act(() => reopened.view.result.current.handleSteerOutcome('session-1', messageId, 'refused'));
+  assert.equal(queueAttempt.mock.calls.length, 1);
+  await act(async () => releaseQueue(json({ error: 'Connection dropped after request' }, 503)));
+});
+
+test('a definitively rejected Codex queue fallback restores the original draft', async () => {
+  appendQueue = async () => json({ error: 'Queue refused' }, 400);
+  const { view, sent } = render({ provider: 'codex', activeCodexTurnId: 'turn-1' });
+  await steer(view, 'restore after refusal');
+  const messageId = String(steerFrames(sent)[0].messageId);
+  await act(async () => view.result.current.handleSteerOutcome('session-1', messageId, 'refused'));
+  await vi.waitFor(() => assert.equal(view.result.current.input, 'restore after refusal'));
+  assert.deepEqual(view.result.current.pendingSteers, []);
+});
+
+test('only a definite unread result restores a stopped Codex steer', async () => {
+  const props = { provider: 'codex' as const, activeCodexTurnId: 'turn-1' };
+  const { view, sent } = render(props);
+  await steer(view, 'restore on stop', [new File(['x'], 'notes.txt')]);
+  const messageId = String(steerFrames(sent)[0].messageId);
+  act(() => view.result.current.handleSteerOutcome('session-1', messageId, 'accepted'));
+  view.rerender({ ...props, isLoading: false, supportsSteering: true });
+  assert.equal(view.result.current.input, '');
+  assert.equal(view.result.current.pendingSteers[0]?.status, 'accepted');
+  await act(async () => view.result.current.handleSteerOutcome('session-1', messageId, 'unread'));
+  assert.equal(view.result.current.input, 'restore on stop');
+  assert.equal(view.result.current.attachedFiles[0]?.name, 'notes.txt');
+  assert.equal(queued.size, 0);
+});
+
+test('restoring an unread Codex message after refresh reattaches the uploaded file', async () => {
+  const props = { provider: 'codex' as const, activeCodexTurnId: 'turn-1' };
+  const { view, sent } = render(props);
+  await steer(view, 'inspect the notes', [new File(['stored text'], 'notes.txt', { type: 'text/plain' })]);
+  const messageId = String(steerFrames(sent)[0].messageId);
+  view.unmount();
+
+  const reopened = render({ ...props, isLoading: false });
+  await act(async () => reopened.view.result.current.handleSteerOutcome('session-1', messageId, 'unread'));
+  await vi.waitFor(() => assert.equal(reopened.view.result.current.input, 'inspect the notes'));
+  assert.deepEqual(reopened.view.result.current.attachedFiles.map(({ name, size }) => [name, size]), [['notes.txt', 11]]);
+  assert.deepEqual(reopened.view.result.current.pendingSteers, []);
+  assert.equal(steerFrames(reopened.sent).length, 0);
 });

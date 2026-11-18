@@ -33,6 +33,9 @@ type ComposerSendMenuProps = {
   supportsSideQuestions?: boolean;
   /** Same gate for the Steer row: whether the provider can take a message into the turn being written. Only `responding` has a turn to steer, so the row never shows for background work. */
   supportsSteering?: boolean;
+  /** Move the send shortcut hint onto Steer when the Codex preference is enabled. */
+  codexSteerByDefault?: boolean;
+  isCodex?: boolean;
   /** Mirrors the composer's "send with Ctrl+Enter" setting, so Queue's hint names the key that actually sends; defaults to false, Enter-to-send, like the composer's own default. */
   sendByCtrlEnter?: boolean;
   onSelect: (choice: ComposerSendMenuChoice) => void;
@@ -58,7 +61,7 @@ function ShortcutHint({ children }: { children: string }) {
  * background-send dialog, so a tap on the first row can never stop or
  * override anything.
  */
-export default function ComposerSendMenu({ state, hasInput, hasText = hasInput, supportsSideQuestions = false, supportsSteering = false, canAbortSession = true, sendByCtrlEnter = false, onSelect }: ComposerSendMenuProps) {
+export default function ComposerSendMenu({ state, hasInput, hasText = hasInput, supportsSideQuestions = false, supportsSteering = false, codexSteerByDefault = false, isCodex = false, canAbortSession = true, sendByCtrlEnter = false, onSelect }: ComposerSendMenuProps) {
   const { t } = useTranslation('chat');
   const [isOpen, setIsOpen] = useState(false);
   const close = useCallback(() => setIsOpen(false), []);
@@ -83,9 +86,10 @@ export default function ComposerSendMenu({ state, hasInput, hasText = hasInput, 
   // Enter only queues while a turn is written; during background work it
   // opens the "send anyway?" confirm dialog instead, so Queue gets no hint
   // there, matching that row's own description above.
-  const queueShortcut = state === 'responding'
+  const sendShortcut = state === 'responding'
     ? (sendByCtrlEnter ? (isApplePlatform ? '⌘↵' : 'Ctrl+↵') : '↵')
     : null;
+  const steerIsDefault = isCodex && supportsSteering && codexSteerByDefault;
   // Esc stops a running turn; background work has no key for Send anyway,
   // so the last row's hint follows the same gate as Queue's.
   const lastShortcut = state === 'responding' ? 'esc' : null;
@@ -118,7 +122,7 @@ export default function ComposerSendMenu({ state, hasInput, hasText = hasInput, 
             role="menuitem"
             label={t('sendMenu.queue.label', { defaultValue: 'Queue' })}
             description={queueDescription}
-            trailing={queueShortcut ? <ShortcutHint>{queueShortcut}</ShortcutHint> : undefined}
+            trailing={sendShortcut && !steerIsDefault ? <ShortcutHint>{sendShortcut}</ShortcutHint> : undefined}
             onSelect={() => select('queue')}
           />
           {state === 'responding' && supportsSteering && (
@@ -130,7 +134,10 @@ export default function ComposerSendMenu({ state, hasInput, hasText = hasInput, 
               isSelected={false}
               role="menuitem"
               label={t('sendMenu.steer.label', { defaultValue: 'Steer' })}
-              description={t('sendMenu.steer.description', { defaultValue: 'Send into this turn; read at the next tool call' })}
+              description={isCodex
+                ? t('sendMenu.steer.codexDescription')
+                : t('sendMenu.steer.description', { defaultValue: 'Send into this turn; read at the next tool call' })}
+              trailing={sendShortcut && steerIsDefault ? <ShortcutHint>{sendShortcut}</ShortcutHint> : undefined}
               onSelect={() => select('steer')}
             />
           )}

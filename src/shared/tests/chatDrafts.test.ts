@@ -145,6 +145,46 @@ test('a draft written in one page load is readable synchronously in the next', a
   assert.equal(second.readDraftText('session-a'), 'survives a reload');
 });
 
+test('a protected offline draft survives reload and server hydration until acknowledged', async () => {
+  const first = await loadStore();
+  first.writeDraftText('session-a', 'steer was never sent', { preserveUntilSaved: true });
+
+  const reopened = await loadStore();
+  serverDrafts = [{ scope: 'session-a', text: 'stale server draft', queuedMessage: null }];
+  await reopened.hydrateChatDrafts();
+  assert.equal(reopened.readDraftText('session-a'), 'steer was never sent');
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.deepEqual(savedDrafts.at(-1), { scope: 'session-a', text: 'steer was never sent' });
+
+  serverDrafts = [{ scope: 'session-a', text: 'new draft from another device', queuedMessage: null }];
+  await reopened.hydrateChatDrafts();
+  assert.equal(reopened.readDraftText('session-a'), 'new draft from another device');
+});
+
+test('a protected clear prevents a sent steer from reappearing in the composer after reload', async () => {
+  const first = await loadStore();
+  first.writeDraftText('session-a', '', { preserveUntilSaved: true });
+
+  const reopened = await loadStore();
+  serverDrafts = [{ scope: 'session-a', text: 'text already sent to Codex', queuedMessage: null }];
+  await reopened.hydrateChatDrafts();
+  assert.equal(reopened.readDraftText('session-a'), '');
+});
+
+test('a protected draft acknowledged during hydration still beats its stale snapshot', async () => {
+  const store = await loadStore();
+  serverDrafts = [{ scope: 'session-a', text: 'stale server draft', queuedMessage: null }];
+  let releaseDrafts!: () => void;
+  draftsResponseGate = new Promise((resolve) => { releaseDrafts = resolve; });
+  const hydrating = store.hydrateChatDrafts();
+
+  store.writeDraftText('session-a', '', { preserveUntilSaved: true });
+  await vi.advanceTimersByTimeAsync(1_500);
+  releaseDrafts();
+  await hydrating;
+  assert.equal(store.readDraftText('session-a'), '');
+});
+
 test('hydrate brings in a draft typed on another device', async () => {
   serverDrafts = [{ scope: 'session-a', text: 'typed on the laptop', queuedMessage: null }];
 

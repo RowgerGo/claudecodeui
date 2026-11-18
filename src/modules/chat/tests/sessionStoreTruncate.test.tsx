@@ -60,6 +60,25 @@ async function loadedStore() {
   return view;
 }
 
+it('upserts cumulative Codex item snapshots in the original row position', async () => {
+  const { result } = await loadedStore();
+  const first = { ...row('5', 'Beginning'), provider: 'codex' as const, turnId: 'turn-1', seq: 1 };
+  const tool = { ...row('6', 'tool output'), provider: 'codex' as const, turnId: 'turn-1', kind: 'tool_result' as const, seq: 2 };
+  const latest = { ...first, content: 'Beginning and ending', timestamp: row('7', '').timestamp, seq: 3 };
+
+  act(() => {
+    result.current.appendRealtime('session-1', first);
+    result.current.appendRealtime('session-1', tool);
+    result.current.appendRealtime('session-1', latest);
+    result.current.appendRealtime('session-1', first);
+  });
+
+  assert.deepEqual(result.current.getMessages('session-1').slice(-2), [
+    { ...latest, timestamp: first.timestamp },
+    tool,
+  ]);
+});
+
 describe('truncateAt', () => {
   it('drops the anchored message and everything after it', async () => {
     const { result } = await loadedStore();

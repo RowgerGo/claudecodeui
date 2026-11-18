@@ -14,18 +14,14 @@ const findCodexModel = (value: string) =>
   CODEX_PREDEFINED_MODELS.OPTIONS.find((option) => option.value === value);
 
 /**
- * Runs the Codex CLI that chats spawn, with a throwaway CODEX_HOME so no user
- * config or login is read. The SDK spawns the native binary of the
- * `@openai/codex-<platform>` package installed next to the `@openai/codex` it
- * resolves; that package's own launcher, resolved the same way, runs it too.
+ * Runs the bundled Codex launcher used by the chat runtime, with a throwaway
+ * CODEX_HOME to isolate user config and login.
  */
 const runChatCodexCli = async (args: string[]): Promise<string> => {
-  const sdkRequire = createRequire(import.meta.resolve('@openai/codex-sdk'));
-  const packageJsonPath = sdkRequire.resolve('@openai/codex/package.json');
-  const { bin } = sdkRequire('@openai/codex/package.json') as { bin: { codex: string } };
+  const launcher = require.resolve('@openai/codex/bin/codex.js');
   const codexHome = await mkdtemp(path.join(os.tmpdir(), 'cloudcli-codex-models-'));
   try {
-    return execFileSync(process.execPath, [path.join(path.dirname(packageJsonPath), bin.codex), ...args], {
+    return execFileSync(process.execPath, [launcher, ...args], {
       encoding: 'utf8',
       env: { ...process.env, CODEX_HOME: codexHome },
       // Piped, not inherited: the CLI warns on stderr that it skips its helper

@@ -35,6 +35,7 @@ test('a fresh install gets the documented defaults', () => {
     showRawParameters: false,
     showThinking: true,
     sendByCtrlEnter: false,
+    codexSteerByDefault: false,
     sidebarVisible: true,
     keepProjectsExpanded: false,
     voiceEnabled: false,
@@ -48,6 +49,12 @@ test('the stored blob is read back', () => {
   assert.equal(preferences.showThinking, false);
   assert.equal(preferences.voiceEnabled, true);
   assert.equal(preferences.sidebarVisible, true, 'unlisted keys keep their default');
+  assert.equal(preferences.codexSteerByDefault, false, 'older preferences default to queue');
+});
+
+test('the saved Codex follow-up preference is read back', () => {
+  storeUiPreferences({ codexSteerByDefault: true });
+  assert.equal(readStoredUiPreferences().codexSteerByDefault, true);
 });
 
 test('values stored as strings are coerced, as older versions wrote them', () => {

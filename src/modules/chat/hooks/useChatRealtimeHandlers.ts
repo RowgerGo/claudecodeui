@@ -35,6 +35,9 @@ type UseChatRealtimeHandlersArgs = {
    * frame; read wherever a `chat.subscribe` is sent (session open, reconnect).
    */
   lastSeqRef: MutableRefObject<Map<string, number>>;
+  /** Last Codex turn observed per session. Sequences restart on each turn. */
+  lastTurnIdRef?: MutableRefObject<Map<string, string>>;
+  onCodexTurnChange?: (sessionId: string, turnId: string | null) => void;
   /** When each session's `chat.subscribe` was last sent; guards stale idle acks. */
   statusCheckSentAtRef: MutableRefObject<Map<string, number>>;
   onSessionProcessing?: MarkSessionProcessing;
@@ -78,6 +81,8 @@ export function useChatRealtimeHandlers({
   streamTimerRef,
   accumulatedStreamRef,
   lastSeqRef,
+  lastTurnIdRef,
+  onCodexTurnChange,
   statusCheckSentAtRef,
   onSessionProcessing,
   onSessionIdle,
@@ -115,6 +120,28 @@ export function useChatRealtimeHandlers({
       onSessionBackground?.(sid, collectRunningBackgroundTasks(normalizedToChatMessages(sessionStore.getMessages(sid))));
     };
 
+    const observeTurn = (sessionId: string, turnId: string) => {
+      if (lastTurnIdRef?.current.get(sessionId) !== turnId) {
+        lastTurnIdRef?.current.set(sessionId, turnId);
+        lastSeqRef.current.set(sessionId, 0);
+      }
+      onCodexTurnChange?.(sessionId, turnId);
+    };
+
+    const reportSteerStatus = (sessionId: string, value: unknown) => {
+      if (!value || typeof value !== 'object') return;
+      const { messageId, outcome } = value as { messageId?: unknown; outcome?: unknown };
+      if (typeof messageId !== 'string') return;
+      switch (outcome) {
+        case 'accepted':
+        case 'delivered':
+        case 'refused':
+        case 'unread':
+        case 'unknown':
+          onSteerOutcome?.(sessionId, messageId, outcome);
+      }
+    };
+
     const handleEvent = (msg: ServerEvent) => {
       if (!msg.kind) {
         return;
@@ -123,8 +150,14 @@ export function useChatRealtimeHandlers({
       const activeViewSessionId = activeViewSessionIdRef.current;
       const sid = (typeof msg.sessionId === 'string' && msg.sessionId) || activeViewSessionId;
 
+      if (sid && msg.kind === 'turn_started' && typeof msg.turnId === 'string') {
+        observeTurn(sid, msg.turnId);
+        onSessionProcessing?.(sid);
+      }
+
       // Record replay progress for every sequenced live event.
-      if (sid && typeof msg.seq === 'number') {
+      if (sid && typeof msg.seq === 'number'
+        && (!msg.turnId || msg.turnId === lastTurnIdRef?.current.get(sid))) {
         const known = lastSeqRef.current.get(sid) ?? 0;
         if (msg.seq > known) {
           lastSeqRef.current.set(sid, msg.seq);
@@ -134,6 +167,9 @@ export function useChatRealtimeHandlers({
       switch (msg.kind) {
         case 'websocket_reconnected':
           onWebSocketReconnect?.();
+          return;
+
+        case 'turn_started':
           return;
 
         case 'history_truncated': {
@@ -152,13 +188,25 @@ export function useChatRealtimeHandlers({
           if (!sid) return;
 
           if (msg.isProcessing) {
+            if (typeof msg.turnId === 'string') observeTurn(sid, msg.turnId);
+            if (msg.turnId === null) onCodexTurnChange?.(sid, null);
             onSessionProcessing?.(sid);
           } else {
+            onCodexTurnChange?.(sid, null);
             // Idle ack: ignore it if a newer request started after the
             // subscribe was sent — the ack describes the older state.
             onSessionIdle?.(sid, {
               ifStartedBefore: statusCheckSentAtRef.current.get(sid),
             });
+            // A turn can finish after the reconnect's first history read
+            // but before subscription. Finished runs are read from history.
+            if (sid === activeViewSessionId && provider === 'codex') {
+              void requestLatestMessages(sid, isActiveRef.current);
+            }
+          }
+
+          if (Array.isArray(msg.steerOutcomes)) {
+            for (const status of msg.steerOutcomes) reportSteerStatus(sid, status);
           }
 
           const isViewedSession = sid === activeViewSessionId;
@@ -185,6 +233,10 @@ export function useChatRealtimeHandlers({
           }
           return;
         }
+
+        case 'chat_steer_status':
+          if (sid) reportSteerStatus(sid, msg);
+          return;
 
         case 'protocol_error': {
           // A message sent into a turn that had already ended. The run is not
@@ -328,6 +380,11 @@ export function useChatRealtimeHandlers({
       // --- UI side effects for specific kinds ---
       switch (msg.kind) {
         case 'complete': {
+          if (sid && typeof msg.turnId === 'string') {
+            const lastTurnId = lastTurnIdRef?.current.get(sid);
+            if (lastTurnId && lastTurnId !== msg.turnId) return;
+            onCodexTurnChange?.(sid, null);
+          }
           // Flush any remaining streaming state
           if (streamTimerRef.current) {
             clearTimeout(streamTimerRef.current);
@@ -483,6 +540,8 @@ export function useChatRealtimeHandlers({
     streamTimerRef,
     accumulatedStreamRef,
     lastSeqRef,
+    lastTurnIdRef,
+    onCodexTurnChange,
     statusCheckSentAtRef,
     onSessionProcessing,
     onSessionIdle,

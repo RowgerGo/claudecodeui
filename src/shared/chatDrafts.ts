@@ -39,6 +39,8 @@ export type StoredQueuedMessage = {
 type DraftRecord = {
   text: string;
   queuedMessage: StoredQueuedMessage | null;
+  /** A recovered stay-local draft or deliberate clear awaiting a server acknowledgment. */
+  awaitingTextSave?: boolean;
 };
 
 /** Fired after any draft changes, from a local write or from a hydrate. */
@@ -60,6 +62,8 @@ const listeners = new Set<() => void>();
 let drafts = new Map<string, DraftRecord>();
 const pendingScopes = new Set<string>();
 let serverWriteTimer: ReturnType<typeof setTimeout> | null = null;
+// A protected text save can finish before a stale hydrate that was already in flight.
+const protectedTextRevisions = new Map<string, number>();
 // Counts this page's changes to each scope's queued message, so a hydrate that
 // was already in flight when one happened does not put back the older copy.
 const queueRevisions = new Map<string, number>();
@@ -76,7 +80,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
 );
 
 const isEmptyDraft = (draft: DraftRecord): boolean => (
-  draft.text === '' && draft.queuedMessage === null
+  draft.text === '' && draft.queuedMessage === null && !draft.awaitingTextSave
 );
 
 function readMirror(): Map<string, DraftRecord> {
@@ -101,6 +105,7 @@ function readMirror(): Map<string, DraftRecord> {
         queuedMessage: isRecord(value.queuedMessage)
           ? (value.queuedMessage as StoredQueuedMessage)
           : null,
+        awaitingTextSave: value.awaitingTextSave === true || undefined,
       });
     }
     return restored;
@@ -143,9 +148,16 @@ function flushServerWrites(): void {
     // timer callback: the mirror already holds the draft, and the next
     // keystroke re-sends it.
     try {
-      void api.user.saveDraft(scope, { text }).catch((error: unknown) => {
-        console.error('Failed to save chat draft:', error);
-      });
+      void api.user.saveDraft(scope, { text })
+        .then((response) => {
+          const current = drafts.get(scope);
+          if (response.ok && current?.awaitingTextSave && current.text === text) {
+            setLocalDraft(scope, { awaitingTextSave: undefined });
+          }
+        })
+        .catch((error: unknown) => {
+          console.error('Failed to save chat draft:', error);
+        });
     } catch (error) {
       console.error('Failed to save chat draft:', error);
     }
@@ -166,7 +178,8 @@ function setLocalDraft(scope: string, update: Partial<DraftRecord>): boolean {
   const current = drafts.get(scope) ?? EMPTY_DRAFT;
   const next: DraftRecord = { ...current, ...update };
 
-  if (next.text === current.text && next.queuedMessage === current.queuedMessage) {
+  if (next.text === current.text && next.queuedMessage === current.queuedMessage
+    && next.awaitingTextSave === current.awaitingTextSave) {
     return false;
   }
 
@@ -236,8 +249,13 @@ export function readDraftText(scope: string): string {
   return drafts.get(scope)?.text ?? '';
 }
 
-export function writeDraftText(scope: string, text: string): void {
-  if (setLocalDraft(scope, { text })) {
+/** Writes a composer's text or clear. Steering may preserve it across reload until the server saves it. */
+export function writeDraftText(scope: string, text: string, { preserveUntilSaved = false } = {}): void {
+  const changed = setLocalDraft(scope, { text, ...(preserveUntilSaved ? { awaitingTextSave: true } : {}) });
+  if (changed && drafts.get(scope)?.awaitingTextSave) {
+    protectedTextRevisions.set(scope, (protectedTextRevisions.get(scope) ?? 0) + 1);
+  }
+  if (changed || preserveUntilSaved) {
     queueServerWrite(scope);
   }
 }
@@ -338,6 +356,8 @@ export function subscribeToChatDrafts(listener: () => void): () => void {
 export async function hydrateChatDrafts(): Promise<void> {
   let serverDrafts: Array<{ scope?: unknown; text?: unknown; queuedMessage?: unknown }> = [];
   const queueRevisionsAtRequest = new Map(queueRevisions);
+  const protectedAtRequest = new Set([...drafts].flatMap(([scope, draft]) => draft.awaitingTextSave ? [scope] : []));
+  const textRevisionsAtRequest = new Map(protectedTextRevisions);
 
   try {
     const response = await api.user.drafts();
@@ -380,21 +400,31 @@ export async function hydrateChatDrafts(): Promise<void> {
   const queueChangedDuringRequest = (scope: string) => (
     (queueRevisions.get(scope) ?? 0) !== (queueRevisionsAtRequest.get(scope) ?? 0)
   );
+  const textChangedDuringRequest = (scope: string) => (
+    (protectedTextRevisions.get(scope) ?? 0) !== (textRevisionsAtRequest.get(scope) ?? 0)
+  );
   const locallyChangedScopes = new Set([
     ...pendingScopes,
+    ...protectedAtRequest,
+    ...[...drafts].flatMap(([scope, draft]) => draft.awaitingTextSave ? [scope] : []),
+    ...[...protectedTextRevisions.keys()].filter(textChangedDuringRequest),
     ...[...queueRevisions.keys()].filter(queueChangedDuringRequest),
   ]);
   for (const scope of locallyChangedScopes) {
     const local = drafts.get(scope) ?? EMPTY_DRAFT;
     const server = merged.get(scope) ?? EMPTY_DRAFT;
     const next: DraftRecord = {
-      text: pendingScopes.has(scope) ? local.text : server.text,
+      text: pendingScopes.has(scope) || local.awaitingTextSave
+        || protectedAtRequest.has(scope) || textChangedDuringRequest(scope)
+        ? local.text : server.text,
       queuedMessage: queueChangedDuringRequest(scope) ? local.queuedMessage : server.queuedMessage,
+      awaitingTextSave: local.awaitingTextSave,
     };
     if (isEmptyDraft(next)) {
       merged.delete(scope);
     } else {
       merged.set(scope, next);
+      if (next.awaitingTextSave && !pendingScopes.has(scope)) queueServerWrite(scope);
     }
   }
 
@@ -407,6 +437,7 @@ export async function hydrateChatDrafts(): Promise<void> {
 export function resetChatDrafts(): void {
   drafts = new Map();
   pendingScopes.clear();
+  protectedTextRevisions.clear();
   queueRevisions.clear();
   queueRequests.clear();
   queueClears.clear();

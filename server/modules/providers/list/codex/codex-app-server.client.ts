@@ -10,21 +10,7 @@ import {
   SIDE_QUESTION_ANSWER_SEPARATOR,
 } from '@/shared/utils.js';
 
-/**
- * Minimal JSON-RPC client for `codex app-server`.
- *
- * Codex ships two entry points and they expose different things. The
- * `@openai/codex-sdk` this app runs conversations through is a wrapper around
- * `codex exec`, and its whole surface is `startThread` and `resumeThread` —
- * there is no way to branch a thread or to resume one partway. The same
- * binary's `app-server` subcommand speaks JSON-RPC and does have that
- * primitive, `thread/fork`, which is what the Codex IDE clients build their
- * own "fork" and "edit an earlier message" on top of.
- *
- * So this is a second transport to the same CLI, opened only for the
- * operations the SDK cannot express. Everything else still goes through the
- * SDK.
- */
+/** Local JSON-RPC transport for Codex chat turns, forks and side questions. */
 
 /** How long a single request may take before the child is killed. */
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -39,14 +25,14 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const SIDE_QUESTION_TURN_TIMEOUT_MS = 5 * 60_000;
 
 type JsonRpcResponse = {
-  id?: number;
   result?: unknown;
   error?: { code?: number; message?: string };
+  transportFailure?: string;
 };
 
 /** A line from the app-server: a reply to us, a notification, or a server request. */
 type JsonRpcLine = {
-  id?: number;
+  id?: string | number;
   method?: string;
   params?: unknown;
   result?: unknown;
@@ -92,6 +78,7 @@ async function withAppServer<T>(
     onExit: (handler: (reason: string) => void) => () => void;
   }) => Promise<T>,
   signal?: AbortSignal,
+  answerRequest?: (method: string) => unknown,
 ): Promise<T> {
   // Resolved through the exported object, not a module-local function, so
   // tests can replace `codexAppServer.resolveLauncher` with a fake app-server
@@ -122,6 +109,10 @@ async function withAppServer<T>(
 
   const exitListeners = new Set<(reason: string) => void>();
   const onExit = (handler: (reason: string) => void): (() => void) => {
+    if (exitReason) {
+      handler(exitReason);
+      return () => {};
+    }
     exitListeners.add(handler);
     return () => exitListeners.delete(handler);
   };
@@ -143,16 +134,14 @@ async function withAppServer<T>(
     // match one of our own pending requests (the app-server reuses our
     // `turn/start` id when it turns around and asks *us* something).
     if (typeof message.method === 'string') {
-      if (typeof message.id === 'number') {
-        // A server request (`item/tool/requestUserInput`,
-        // `mcpServer/elicitation/request`, `item/tool/call`, …) that
-        // `approvalPolicy: 'never'` does not suppress. A side question has no
-        // one to answer it, so it is rejected at once rather than left
-        // pending — an unanswered one stalls the turn that is waiting on it.
+      if (typeof message.id === 'number' || typeof message.id === 'string') {
+        const response = answerRequest?.(message.method);
         child.stdin?.write(`${JSON.stringify({
           jsonrpc: '2.0',
           id: message.id,
-          error: { code: -32601, message: 'Side questions do not support interactive requests.' },
+          ...(response === undefined
+            ? { error: { code: -32601, message: 'This Codex connection does not support the interactive request.' } }
+            : { result: response }),
         })}\n`);
         return;
       }
@@ -170,9 +159,10 @@ async function withAppServer<T>(
   });
 
   const failPending = (reason: string) => {
+    if (exitReason) return;
     exitReason = reason;
     for (const resolve of pending.values()) {
-      resolve({ error: { message: reason } });
+      resolve({ transportFailure: reason });
     }
     pending.clear();
     for (const listener of exitListeners) {
@@ -181,7 +171,7 @@ async function withAppServer<T>(
   };
 
   child.on('error', (error) => failPending(error.message));
-  child.on('exit', (code, signal) => {
+  child.on('close', (code, signal) => {
     failPending(`codex app-server exited (code ${code ?? 'null'}, signal ${signal ?? 'null'})`);
   });
   // A child that dies mid-request leaves its pipes broken, and the next write
@@ -213,6 +203,13 @@ async function withAppServer<T>(
 
       pending.set(id, (response) => {
         clearTimeout(timer);
+        if (response.transportFailure) {
+          reject(new AppError(response.transportFailure, {
+            code: 'CODEX_APP_SERVER_UNAVAILABLE',
+            statusCode: 502,
+          }));
+          return;
+        }
         if (response.error) {
           reject(new AppError(response.error.message || `Codex app-server rejected "${method}".`, {
             code: 'CODEX_APP_SERVER_ERROR',
@@ -235,6 +232,10 @@ async function withAppServer<T>(
   signal?.addEventListener('abort', killOnAbort, { once: true });
 
   try {
+    if (signal?.aborted) {
+      killOnAbort();
+      throw signal.reason;
+    }
     // `capabilities` is deliberately empty. `thread/fork` with `lastTurnId` is
     // in the stable protocol; only `beforeTurnId` and the turn-listing methods
     // are gated behind `experimentalApi`, and neither is needed here.
@@ -250,6 +251,7 @@ async function withAppServer<T>(
       throw new AppError(`${error.message}${stderr ? ` — ${stderr.trim().split('\n').slice(-1)[0]}` : ''}`, {
         code: error.code,
         statusCode: error.statusCode,
+        details: error.details,
       });
     }
     throw error;
@@ -260,7 +262,26 @@ async function withAppServer<T>(
   }
 }
 
+/** Used by the Codex providers and their tests to speak to the bundled CLI. */
 export const codexAppServer = {
+  /** Used by the main chat runtime to keep the transport open through a turn. */
+  withChatConnection<T>(run: Parameters<typeof withAppServer<T>>[0], signal: AbortSignal): Promise<T> {
+    // Main chat historically used exec's non-interactive permissions. Keep
+    // its configured sandbox and explicitly decline any escalation requested.
+    return withAppServer(run, signal, (method) => {
+      switch (method) {
+        case 'item/commandExecution/requestApproval':
+        case 'item/fileChange/requestApproval':
+          return { decision: 'decline' };
+        case 'item/permissions/requestApproval':
+          return { permissions: {}, scope: 'turn' };
+        case 'mcpServer/elicitation/request':
+          return { action: 'cancel' };
+        default:
+          return undefined;
+      }
+    });
+  },
   /**
    * Resolves the `codex` launcher shipped in node_modules.
    *
@@ -275,7 +296,7 @@ export const codexAppServer = {
     try {
       return require_.resolve('@openai/codex/bin/codex.js');
     } catch {
-      throw new AppError('The Codex CLI package is not installed, so Codex conversations cannot be branched.', {
+      throw new AppError('The bundled Codex CLI is not installed.', {
         code: 'CODEX_APP_SERVER_UNAVAILABLE',
         statusCode: 501,
       });

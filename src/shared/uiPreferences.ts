@@ -13,6 +13,7 @@ export type UiPreferences = {
   showRawParameters: boolean;
   showThinking: boolean;
   sendByCtrlEnter: boolean;
+  codexSteerByDefault: boolean;
   sidebarVisible: boolean;
   keepProjectsExpanded: boolean;
   voiceEnabled: boolean;
@@ -28,6 +29,7 @@ const DEFAULTS: UiPreferences = {
   showRawParameters: false,
   showThinking: true,
   sendByCtrlEnter: false,
+  codexSteerByDefault: false,
   sidebarVisible: true,
   keepProjectsExpanded: false,
   voiceEnabled: false,

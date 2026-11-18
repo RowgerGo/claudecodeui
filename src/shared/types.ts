@@ -273,6 +273,8 @@ export type ServerEvent = {
   type?: string;
   sessionId?: string;
   seq?: number;
+  /** Codex turn that owns this frame or the active turn in a subscribe response. */
+  turnId?: string | null;
   [key: string]: unknown;
 };
 
@@ -584,6 +586,8 @@ export type NormalizedMessage = {
    * REST history messages do not carry it.
    */
   seq?: number;
+  /** Active Codex turn that owns the live item, when the run is sequenced. */
+  turnId?: string;
 
   // kind-specific fields (flat for simplicity)
   role?: 'user' | 'assistant';
@@ -836,31 +840,32 @@ export type QueuedDraft = {
 
 /**
  * A message sent into a running turn (steering) that the agent has not read
- * yet. The composer shows it as a card until its echo reaches the transcript;
- * `status` is `sending` until the server confirms it reached the turn, then
- * `accepted`. Local to the tab that sent it.
+ * yet. The tab shows its input and delivery status as a card until its echo
+ * reaches the transcript, or the input can be safely restored or queued.
  */
 export type PendingSteer = {
   /** The UUID the message was sent with; its transcript row and live echo carry it too. */
   messageId: string;
   /** The session whose turn it was sent into. */
   sessionKey: string;
+  /** The Codex turn selected before any attachment upload or network delay. */
+  expectedTurnId?: string;
   content: string;
   /** Browser files kept so the message can go back into the composer intact. */
   attachments: File[];
   /** Descriptors uploaded before it was sent, reused if it has to be queued instead. */
   uploadedAttachments: unknown[];
-  status: 'sending' | 'accepted';
+  status: 'sending' | 'accepted' | 'unknown' | 'unread' | 'unsent' | 'queueing' | 'queue-unknown';
 };
 
 /**
  * What became of a steered message, as the realtime handler reports it to the
  * composer: `accepted` (the server put it into the turn), `refused` (the turn
  * had already ended, so it should go out as the next turn) or `delivered` (the
- * agent read it; its echo is in the transcript). `delivered` is reported for
- * every live user message, so the composer matches it against its own ids.
+ * agent read it; its echo is in the transcript). Codex can also report
+ * `unread` (safe to restore) or `unknown` (wait for confirmation).
  */
-export type SteerOutcome = 'accepted' | 'refused' | 'delivered';
+export type SteerOutcome = 'accepted' | 'refused' | 'delivered' | 'unknown' | 'unread';
 
 /** The answer to the prompt shown when sending over a session's background work: send now (stopping that work), queue the message until the work finishes, ask a side question instead, or do nothing. */
 export type BackgroundSendChoice = 'send' | 'queue' | 'sideQuestion' | 'cancel';
@@ -1465,6 +1470,7 @@ export type PreferenceToggleKey =
   | 'showRawParameters'
   | 'showThinking'
   | 'sendByCtrlEnter'
+  | 'codexSteerByDefault'
   | 'voiceEnabled';
 
 /** The full set of quick settings booleans keyed by PreferenceToggleKey, held together so the panel can read every toggle from one object. */

@@ -15,7 +15,9 @@ import ComposerSendMenu from '@/modules/chat/composer/ComposerSendMenu';
 
 const renderMenu = (
   state: 'responding' | 'background',
-  { supportsSteering = true, hasInput = true }: { supportsSteering?: boolean; hasInput?: boolean } = {},
+  { supportsSteering = true, hasInput = true, codexSteerByDefault = false }: {
+    supportsSteering?: boolean; hasInput?: boolean; codexSteerByDefault?: boolean;
+  } = {},
 ) => {
   const onSelect = vi.fn<(choice: string) => void>();
   render(
@@ -24,6 +26,8 @@ const renderMenu = (
       hasInput={hasInput}
       supportsSideQuestions
       supportsSteering={supportsSteering}
+      isCodex={codexSteerByDefault}
+      codexSteerByDefault={codexSteerByDefault}
       onSelect={onSelect}
     />,
   );
@@ -47,6 +51,14 @@ const row = (menu: HTMLElement, label: string) => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+test('Codex puts the send shortcut on Steer when that is the default', () => {
+  renderMenu('responding', { codexSteerByDefault: true });
+  const menu = open();
+  assert.equal(row(menu, 'Queue').querySelector('kbd'), null);
+  assert.equal(row(menu, 'Steer').querySelector('kbd')?.textContent, '↵');
+  assert.match(row(menu, 'Steer').textContent ?? '', /current Codex turn/);
 });
 
 test('while a turn is written, Steer sits right under Queue and reports its choice', () => {

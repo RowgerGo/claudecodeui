@@ -107,6 +107,8 @@ type UseChatSessionStateArgs = {
   statusCheckSentAtRef: MutableRefObject<Map<string, number>>;
   /** Highest live seq observed per session; sent as `lastSeq` on subscribe. */
   lastSeqRef: MutableRefObject<Map<string, number>>;
+  /** Codex turn cursor and pending steer IDs for the current subscription. */
+  getSubscriptionOptions?: (sessionId: string) => { lastTurnId?: string; pendingSteerIds?: string[] };
   sessionStore: SessionStore;
 };
 
@@ -205,6 +207,7 @@ export function useChatSessionState({
   resetStreamingState,
   statusCheckSentAtRef,
   lastSeqRef,
+  getSubscriptionOptions,
   sessionStore,
 }: UseChatSessionStateArgs) {
   const { t } = useTranslation('chat');
@@ -693,9 +696,10 @@ export function useChatSessionState({
       sessions: [{
         sessionId: selectedSession.id,
         lastSeq: lastSeqRef.current.get(selectedSession.id) ?? 0,
+        ...getSubscriptionOptions?.(selectedSession.id),
       }],
     });
-  }, [lastSeqRef, selectedProject, selectedSession, sendMessage, statusCheckSentAtRef, ws]);
+  }, [getSubscriptionOptions, lastSeqRef, selectedProject, selectedSession, sendMessage, statusCheckSentAtRef, ws]);
 
   // Main session loading effect — store-based.
   //

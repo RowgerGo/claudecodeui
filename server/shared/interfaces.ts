@@ -70,13 +70,10 @@ export interface IProviderRuntime {
     context: ProviderRuntimeContext,
   ): Promise<SideQuestionOutcome>;
   /**
-   * Delivers a user message into the session's running turn instead of
-   * starting a new one: the model reads it at its next tool-call boundary and
-   * carries on, with nothing stopped. `options` carries the verified
-   * `images`/`files` descriptors and the `messageId` (a UUID) the message is
-   * tracked by. Resolves false when the session has no turn that
-   * can still take it; the caller then sends it as an ordinary new turn. Only
-   * a runtime that keeps its CLI's input open during a turn implements this.
+   * Delivers a follow-up to the running turn. The chat gateway supplies verified
+   * attachments and a stable message UUID. Codex also requires `expectedTurnId`
+   * to match the live turn. Returns false for a definite refusal, allowing
+   * the gateway to offer queueing. A transport error leaves delivery unknown.
    */
   steer?(sessionId: string, command: string, options: AnyRecord): Promise<boolean>;
 }

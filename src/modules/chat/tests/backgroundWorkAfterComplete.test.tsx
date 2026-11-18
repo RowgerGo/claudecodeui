@@ -4,7 +4,7 @@ import { renderHook } from '@testing-library/react';
 import { test } from 'vitest';
 
 import { useChatRealtimeHandlers } from '@/modules/chat/hooks/useChatRealtimeHandlers';
-import type { BackgroundTaskSummary, NormalizedMessage, ProjectSession, ServerEvent, SessionActivity } from '@/shared/types';
+import type { BackgroundTaskSummary, LLMProvider, NormalizedMessage, ProjectSession, ServerEvent, SessionActivity, SteerOutcome } from '@/shared/types';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 
 /**
@@ -18,11 +18,15 @@ import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 
 type ActivityLog = Array<{ sessionId: string; tasks: BackgroundTaskSummary[] } | { sessionId: string; idle: true }>;
 
-const renderHandlers = () => {
+const renderHandlers = (provider: LLMProvider = 'claude') => {
   let listener: ((event: ServerEvent) => void) | null = null;
   const stored: NormalizedMessage[] = [];
   const log: ActivityLog = [];
   const syncs: string[] = [];
+  const lastSeqRef = { current: new Map<string, number>() };
+  const lastTurnIdRef = { current: new Map<string, string>() };
+  const turns: Array<string | null> = [];
+  const steerOutcomes: Array<[string, SteerOutcome]> = [];
   // The activity map as the provider would hold it, so the handler's read of
   // "is this session background-only" sees its own earlier report.
   const activityBySession = new Map<string, SessionActivity>();
@@ -33,7 +37,7 @@ const renderHandlers = () => {
       listener = fn;
       return () => { listener = null; };
     },
-    provider: 'claude',
+    provider,
     selectedSession: { id: 'viewed-session' } as ProjectSession,
     currentSessionId: 'viewed-session',
     setTokenBudget: () => {},
@@ -41,7 +45,10 @@ const renderHandlers = () => {
     setPendingPermissionRequests: () => {},
     streamTimerRef: { current: null },
     accumulatedStreamRef: { current: '' },
-    lastSeqRef: { current: new Map() },
+    lastSeqRef,
+    lastTurnIdRef,
+    onCodexTurnChange: (_sessionId, turnId) => turns.push(turnId),
+    onSteerOutcome: (_sessionId, messageId, outcome) => steerOutcomes.push([messageId, outcome]),
     statusCheckSentAtRef: { current: new Map() },
     onSessionIdle: (sessionId) => {
       if (sessionId) {
@@ -68,7 +75,7 @@ const renderHandlers = () => {
   }));
 
   const dispatch = (event: ServerEvent) => listener?.(event);
-  return { dispatch, log, syncs, stored };
+  return { dispatch, log, syncs, stored, lastSeqRef, lastTurnIdRef, turns, steerOutcomes };
 };
 
 const event = (fields: Record<string, unknown>): ServerEvent => ({
@@ -84,6 +91,31 @@ const workflowLaunch = () => [
   event({ kind: 'tool_result', toolId: 'toolu_workflow_1', content: 'Workflow launched in background', toolUseResult: { status: 'async_launched', taskId: 'wxkj4kcvd' } }),
   event({ kind: 'task_status', event: 'started', taskId: 'wxkj4kcvd', toolUseId: 'toolu_workflow_1', taskType: 'local_workflow', workflowName: 'audit', description: 'Audit the frontend' }),
 ];
+
+test('Codex reconnect updates the replay cursor and reconciles pending messages by id', () => {
+  const { dispatch, lastSeqRef, lastTurnIdRef, turns, steerOutcomes, syncs } = renderHandlers('codex');
+  const sessionId = 'viewed-session';
+  dispatch(event({ kind: 'turn_started', turnId: 'old-turn', seq: 1 }));
+  dispatch(event({ kind: 'text', role: 'assistant', turnId: 'old-turn', seq: 44 }));
+  assert.equal(lastSeqRef.current.get(sessionId), 44);
+
+  dispatch(event({
+    kind: 'chat_subscribed',
+    isProcessing: true,
+    turnId: 'new-turn',
+    steerOutcomes: [{ messageId: 'm1', outcome: 'delivered' }],
+  }));
+  assert.equal(lastTurnIdRef.current.get(sessionId), 'new-turn');
+  assert.equal(lastSeqRef.current.get(sessionId), 0);
+  dispatch(event({ kind: 'text', role: 'assistant', turnId: 'new-turn', seq: 4 }));
+  dispatch(event({ kind: 'chat_steer_status', messageId: 'm2', outcome: 'unread', turnId: 'old-turn', seq: 45 }));
+  assert.equal(lastSeqRef.current.get(sessionId), 4, 'older steer statuses cannot move the active replay cursor');
+  assert.deepEqual(steerOutcomes, [['m1', 'delivered'], ['m2', 'unread']]);
+
+  dispatch(event({ kind: 'chat_subscribed', isProcessing: false }));
+  assert.deepEqual(turns, ['old-turn', 'new-turn', null]);
+  assert.deepEqual(syncs, [sessionId], 'completed runs reconcile from persisted history');
+});
 
 test('a turn that ends with a task still running leaves the session as background work', () => {
   const { dispatch, log } = renderHandlers();

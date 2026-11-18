@@ -5,8 +5,6 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { Codex } from '@openai/codex-sdk';
-import type { Thread } from '@openai/codex-sdk';
 import type { WebSocket } from 'ws';
 
 import {
@@ -24,6 +22,7 @@ import {
   isClaudeSDKSessionActive,
   queryClaudeSDK,
 } from '@/modules/providers/list/claude/claude-runtime.provider.js';
+import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
 import { codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
 import { cursorRuntime } from '@/modules/providers/list/cursor/cursor-runtime.provider.js';
 import { opencodeRuntime } from '@/modules/providers/list/opencode/opencode-runtime.provider.js';
@@ -261,76 +260,48 @@ test('opencode: a turn whose server dies is still reported as failed', async () 
   }));
 });
 
-/** A Codex thread whose stream starts, then waits for the abort signal and ends the way `mode` says. */
-function createAbortableThread(mode: 'throws' | 'yields'): Thread {
-  return {
-    id: 'codex-native-1',
-    async runStreamed(_input: unknown, options?: { signal?: AbortSignal }) {
-      const signal = options?.signal;
-      return {
-        events: (async function* () {
-          yield { type: 'thread.started', thread_id: 'codex-native-1' };
-          await new Promise<void>((resolve) => {
-            if (signal?.aborted) {
-              resolve();
-              return;
-            }
-            signal?.addEventListener('abort', () => resolve(), { once: true });
-          });
-          if (mode === 'throws') {
-            // What the SDK does: the spawn signal kills the CLI and the
-            // generator rethrows the AbortError once stdout closes.
-            throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
-          }
-          yield { type: 'item.completed', item: { id: 'late', type: 'agent_message', text: 'late' } };
-        })(),
-      };
-    },
-  } as unknown as Thread;
-}
-
-for (const mode of ['throws', 'yields'] as const) {
-  test(`codex: a cancelled run is reported as stopped/aborted (stream ${mode} after abort)`, async (t) => {
-    await withDesktopListener(async ({ userId, payloads }) => {
-      t.mock.method(Codex.prototype, 'startThread', () => createAbortableThread(mode));
-      const sessionId = `codex-abort-session-${mode}`;
-      const writer = createWriter(userId);
-
-      const run = codexRuntime.run('hello', { sessionId, cwd: process.cwd() }, writer, runtimeContext);
-      await waitFor(() => writer.sessionIds.length > 0, 'codex to start');
-
-      // Awaited: the abort may be async (it waits for the CLI to exit).
-      assert.equal(await codexRuntime.abort(sessionId), true);
-      await run;
-
-      assert.deepEqual(payloads.map((payload) => payload.data.code), ['run.stopped'], `notifications sent: ${JSON.stringify(payloads)}`);
-      assert.match(payloads[0].body, /aborted$/);
-      assert.equal(payloads[0].data.sessionId, sessionId);
-    });
-  });
-}
-
-test('codex: an error that only mentions "aborted", with no user abort, is not reported as a cancellation', async (t) => {
+test('codex: a cancelled App Server turn is reported as stopped/aborted', async (t) => {
   await withDesktopListener(async ({ userId, payloads }) => {
-    t.mock.method(Codex.prototype, 'startThread', () => ({
-      id: 'codex-native-2',
-      async runStreamed() {
-        return {
-          events: (async function* () {
-            yield { type: 'thread.started', thread_id: 'codex-native-2' };
-            throw new Error('stream aborted by the upstream proxy');
-          })(),
-        };
+    let notify!: (method: string, params: unknown) => void;
+    t.mock.method(codexAppServer, 'withChatConnection', async (run: Parameters<typeof codexAppServer.withChatConnection>[0]) => run({
+      onNotification(handler) {
+        notify = handler;
+        return () => {};
       },
-    }) as unknown as Thread);
+      onExit: () => () => {},
+      async call(method) {
+        if (method === 'thread/start') return { thread: { id: 'codex-native-1' } };
+        const aborted = method === 'turn/interrupt';
+        const turn = { id: 'turn-1', status: aborted ? 'interrupted' : 'inProgress' };
+        notify(aborted ? 'turn/completed' : 'turn/started', { threadId: 'codex-native-1', turn });
+        return { turn };
+      },
+    }));
+    const sessionId = 'codex-abort-session';
     const writer = createWriter(userId);
 
-    await codexRuntime.run('hello', { sessionId: 'codex-not-aborted', cwd: process.cwd() }, writer, runtimeContext).catch(() => {});
+    const run = codexRuntime.run('hello', { sessionId, cwd: process.cwd() }, writer, runtimeContext);
+    await waitFor(() => writer.sessionIds.length > 0, 'codex to start');
 
-    assert.ok(
-      !payloads.some((payload) => payload.data.code === 'run.stopped'),
-      `notifications sent: ${JSON.stringify(payloads)}`,
-    );
+    assert.equal(await codexRuntime.abort(sessionId), true);
+    await run;
+
+    assert.deepEqual(payloads.map((payload) => payload.data.code), ['run.stopped']);
+    assert.match(payloads[0].body, /aborted$/);
+    assert.equal(payloads[0].data.sessionId, sessionId);
+  });
+});
+
+test('codex: an error that only mentions "aborted", with no user abort, is reported as a failure', async (t) => {
+  await withDesktopListener(async ({ userId, payloads }) => {
+    t.mock.method(codexAppServer, 'withChatConnection', async () => {
+      throw new Error('stream aborted by the upstream proxy');
+    });
+    const writer = createWriter(userId);
+
+    await codexRuntime.run('hello', { sessionId: 'codex-not-aborted', cwd: process.cwd() }, writer, runtimeContext);
+
+    assert.deepEqual(payloads.map((payload) => payload.data.code), ['run.failed']);
   });
 });
 

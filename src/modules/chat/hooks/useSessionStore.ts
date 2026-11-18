@@ -762,11 +762,23 @@ export function useSessionStore() {
       msg.sessionId === sessionId
         ? msg
         : { ...msg, sessionId };
-    let updated = [...slot.realtimeMessages, normalizedMessage];
-    if (updated.length > MAX_REALTIME_MESSAGES) {
-      updated = updated.slice(-MAX_REALTIME_MESSAGES);
+    const index = normalizedMessage.provider === 'codex' && normalizedMessage.turnId
+      ? slot.realtimeMessages.findIndex((row) => (
+        row.id === normalizedMessage.id && row.turnId === normalizedMessage.turnId
+      ))
+      : -1;
+    const updated = [...slot.realtimeMessages];
+    if (index >= 0) {
+      const previous = updated[index];
+      if (typeof previous.seq === 'number' && typeof normalizedMessage.seq === 'number'
+        && normalizedMessage.seq <= previous.seq) return;
+      // App Server sends cumulative snapshots for each item. Keep the first
+      // timestamp so progress does not move the row past a newer tool call.
+      updated[index] = { ...normalizedMessage, timestamp: previous.timestamp };
+    } else {
+      updated.push(normalizedMessage);
     }
-    slot.realtimeMessages = updated;
+    slot.realtimeMessages = updated.length > MAX_REALTIME_MESSAGES ? updated.slice(-MAX_REALTIME_MESSAGES) : updated;
     recomputeMergedIfNeeded(slot);
     notify(sessionId);
   }, [getSlot, notify]);

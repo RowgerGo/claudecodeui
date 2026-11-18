@@ -221,6 +221,8 @@ export type MessageKind =
   | 'stream_end'
   | 'error'
   | 'complete'
+  | 'turn_started'
+  | 'chat_steer_status'
   | 'status'
   | 'permission_request'
   | 'permission_resolved'
@@ -241,6 +243,7 @@ export type MessageKind =
  */
 export type GatewayEventKind =
   | 'chat_subscribed'
+  | 'chat_steer_accepted'
   | 'session_upserted'
   | 'loading_progress'
   | 'protocol_error'
@@ -255,6 +258,15 @@ export type GatewayEventKind =
  * `GatewayEventKind` values.
  */
 export type ServerEventKind = MessageKind | GatewayEventKind;
+
+// ---------------------------
+//----------------- CHAT STEERING TYPES ------------
+/**
+ * Codex steer receipt sent by the chat gateway, including during subscription.
+ * Acceptance is an RPC acknowledgement, delivery requires a user-message echo,
+ * and an unknown result must never trigger another send.
+ */
+export type ChatSteerOutcome = 'accepted' | 'delivered' | 'refused' | 'unread' | 'unknown';
 
 // ---------------------------
 //----------------- SIDE QUESTION TYPES ------------
@@ -492,6 +504,10 @@ export type NormalizedMessage = {
    * the live events they missed across websocket reconnects.
    */
   seq?: number;
+  /** Native Codex turn identity for targeting steer and interpreting the replay cursor. */
+  turnId?: string;
+  /** True on completion after Codex confirms its terminal turn event. */
+  turnSettleConfirmed?: boolean;
   role?: 'user' | 'assistant';
   content?: string;
   /**

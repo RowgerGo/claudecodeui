@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowDownIcon } from 'lucide-react';
 
@@ -36,7 +36,7 @@ type ChatInterfaceProps = {
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
   ws: WebSocket | null;
-  sendMessage: (message: unknown) => void;
+  sendMessage: (message: unknown) => boolean | void;
   onFileOpen?: (filePath: string, diffInfo?: any) => void;
   onNavigateToSession?: (targetSessionId: string, options?: SessionNavigationOptions) => void;
   onSessionEstablished?: (sessionId: string, context: SessionEstablishedContext) => void;
@@ -44,6 +44,7 @@ type ChatInterfaceProps = {
   showRawParameters?: boolean;
   showThinking?: boolean;
   sendByCtrlEnter?: boolean;
+  codexSteerByDefault?: boolean;
   externalMessageUpdate?: number;
   newSessionTrigger?: number;
   onTaskClick?: (...args: unknown[]) => void;
@@ -68,6 +69,7 @@ function ChatInterface({
   showRawParameters,
   showThinking,
   sendByCtrlEnter,
+  codexSteerByDefault = false,
   externalMessageUpdate,
   newSessionTrigger,
   onShowAllTasks,
@@ -93,6 +95,31 @@ function ChatInterface({
   // on every sequenced frame, read whenever a `chat.subscribe` is sent so the
   // server replays only the events this client actually missed.
   const lastSeqRef = useRef(new Map<string, number>());
+  // The sequence cursor is scoped to the last observed Codex turn, even
+  // after that turn finishes and no longer accepts follow-up messages.
+  const lastTurnIdRef = useRef(new Map<string, string>());
+  // Active turn IDs drive the send menu and prevent a late send from being
+  // steered into a newer turn.
+  const [activeCodexTurns, setActiveCodexTurns] = useState(() => new Map<string, string>());
+  const onCodexTurnChange = useCallback((sessionId: string, turnId: string | null) => {
+    setActiveCodexTurns((current) => {
+      if ((current.get(sessionId) ?? null) === turnId) return current;
+      const next = new Map(current);
+      if (turnId) next.set(sessionId, turnId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
+  // Session subscriptions are prepared before the composer hook runs.
+  const getPendingSteerIdsRef = useRef<((sessionId: string) => string[]) | undefined>(undefined);
+  const getSubscriptionOptions = useCallback((sessionId: string) => {
+    const lastTurnId = lastTurnIdRef.current.get(sessionId);
+    const pendingSteerIds = getPendingSteerIdsRef.current?.(sessionId) ?? [];
+    return {
+      ...(lastTurnId ? { lastTurnId } : {}),
+      ...(pendingSteerIds.length > 0 ? { pendingSteerIds } : {}),
+    };
+  }, []);
 
   const resetStreamingState = useCallback(() => {
     if (streamTimerRef.current) {
@@ -178,6 +205,7 @@ function ChatInterface({
     resetStreamingState,
     statusCheckSentAtRef,
     lastSeqRef,
+    getSubscriptionOptions,
     sessionStore,
   });
 
@@ -233,6 +261,8 @@ function ChatInterface({
     }
   }, [handleClearContext, t]);
 
+  const activeCodexTurnId = activeCodexTurns.get(selectedSession?.id || currentSessionId || '');
+  const canSteerCurrentTurn = supportsSteering && (provider !== 'codex' || Boolean(activeCodexTurnId));
   const {
     input,
     setInput,
@@ -269,6 +299,7 @@ function ChatInterface({
     deleteQueuedDraft,
     pendingSteers,
     handleSteerOutcome,
+    getPendingSteerIds,
     handleVoiceTranscript,
     handleInputChange,
     handleKeyDown,
@@ -305,6 +336,8 @@ function ChatInterface({
     isConnected,
     sendByCtrlEnter,
     supportsSteering,
+    codexSteerByDefault,
+    activeCodexTurnId,
     onSessionProcessing,
     onSessionEstablished: handleSessionEstablished,
     onFileOpen,
@@ -317,6 +350,22 @@ function ChatInterface({
     resolvePermissionModeForProvider,
     supportsSideQuestions,
   });
+  useLayoutEffect(() => {
+    getPendingSteerIdsRef.current = getPendingSteerIds;
+  }, [getPendingSteerIds]);
+
+  // A reload can recover history even after the server's replay record expired.
+  // Settle only exact user-message echoes; matching the text can retire a
+  // different send of the same words.
+  useEffect(() => {
+    const sessionId = selectedSession?.id || currentSessionId;
+    if (!sessionId || !pendingSteers?.some((steer) => steer.expectedTurnId)) return;
+    for (const row of sessionStore.getMessages(sessionId)) {
+      if (row.kind === 'text' && row.role === 'user') {
+        handleSteerOutcome(sessionId, row.id, 'delivered');
+      }
+    }
+  }, [chatMessages, currentSessionId, handleSteerOutcome, pendingSteers, selectedSession?.id, sessionStore]);
 
   // On WebSocket reconnect, request a bounded persisted-tail sync (deferred
   // while Chat is hidden), then re-subscribe — the
@@ -331,9 +380,10 @@ function ChatInterface({
       sessions: [{
         sessionId: selectedSession.id,
         lastSeq: lastSeqRef.current.get(selectedSession.id) ?? 0,
+        ...getSubscriptionOptions(selectedSession.id),
       }],
     });
-  }, [isActive, requestLatestMessages, selectedProject, selectedSession, sendMessage]);
+  }, [getSubscriptionOptions, isActive, requestLatestMessages, selectedProject, selectedSession, sendMessage]);
 
   useChatRealtimeHandlers({
     isActive,
@@ -347,6 +397,8 @@ function ChatInterface({
     streamTimerRef,
     accumulatedStreamRef,
     lastSeqRef,
+    lastTurnIdRef,
+    onCodexTurnChange,
     statusCheckSentAtRef,
     onSessionProcessing,
     onSessionIdle,
@@ -613,7 +665,9 @@ function ChatInterface({
           onEditQueuedDraft={editQueuedDraft}
           onDeleteQueuedDraft={deleteQueuedDraft}
           onSendMenuChoice={handleSendMenuChoice}
-          supportsSteering={supportsSteering}
+          supportsSteering={canSteerCurrentTurn}
+          codexSteerByDefault={provider === 'codex' && codexSteerByDefault}
+          isCodex={provider === 'codex'}
           pendingSteers={pendingSteers}
           attachedFiles={attachedFiles}
           onRemoveAttachment={(index) =>

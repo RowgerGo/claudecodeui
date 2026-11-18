@@ -120,14 +120,12 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsTokenUsage: true,
     supportsEffort: true,
     effortLevels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-    // Not from the Codex SDK, which only starts and resumes threads: both ride
-    // the same CLI's `app-server` protocol, whose `thread/fork` copies a
-    // thread up to a chosen turn. Editing is that fork plus a new prompt,
-    // which is how Codex's own IDE clients do it.
+    // App Server's `thread/fork` copies a thread up to a chosen turn.
+    // Editing uses that fork and starts a turn with the replacement prompt.
     supportsMessageEditing: true,
     supportsSessionForking: true,
     supportsSideQuestions: true,
-    supportsSteering: false,
+    supportsSteering: true,
     supportsContextClearing: false,
   },
   opencode: {
