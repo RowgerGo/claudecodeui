@@ -33,7 +33,7 @@ const TOKEN_COST_CALCULATOR_PLUGIN_URL = 'https://github.com/NightmareAway/cloud
 const TASK_QUEUE_PLUGIN_URL = 'https://github.com/TadMSTR/cloudcli-plugin-task-queue';
 const GITHUB_ISSUES_BOARD_PLUGIN_URL = 'https://github.com/szmidtpiotr/claude-github-issue';
 const CLAUDE_USAGE_PLUGIN_URL = 'https://github.com/HandyS11/cloudcli-plugin-claude-usage';
-const CODEX_USAGE_PLUGIN_URL = 'https://github.com/dongwook-chan/cloudcli-plugin-codex-usage';
+const CODEX_USAGE_PLUGIN_URL = 'https://github.com/RowgerGo/cloudcli-plugin-codex-usage';
 const GLM_USAGE_PLUGIN_URL = 'https://github.com/realjustinwu/CloudCLI-GLM-Usage';
 const AGENT_MONITOR_PLUGIN_URL = 'https://github.com/notetook/cloudcli-plugin-agent-monitor';
 
