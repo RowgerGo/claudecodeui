@@ -610,3 +610,61 @@ test('Codex history restores user prompts from typed item_completed rows', { con
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
+
+test('Codex history folds checkpoint and notification records into one row per compaction', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'codex-compaction-history-'));
+  const restoreHomeDir = patchHomeDir(tempRoot);
+
+  try {
+    const providerSessionId = 'codex-compaction-thread';
+    const transcriptPath = await writeCodexTranscript(tempRoot, providerSessionId, tempRoot, 'A prompt');
+    const event = (type: string, fields: Record<string, unknown> = {}) => ({
+      type: 'event_msg', payload: { type, ...fields },
+    });
+    const compactionItem = (id: string, turnId: string) => event('item_completed', {
+      turn_id: turnId, item: { type: 'ContextCompaction', id },
+    });
+    const records = [
+      { type: 'session_meta', payload: { id: providerSessionId, cwd: tempRoot } },
+      event('task_started', { turn_id: 'first-turn' }),
+      { type: 'compacted', payload: { message: 'Native summary', pre_tokens: 200, post_tokens: 20 } },
+      compactionItem('compact-a', 'first-turn'),
+      event('context_compacted'),
+      { type: 'compacted', payload: { message: '', replacement_history: [] } },
+      compactionItem('compact-b', 'first-turn'),
+      compactionItem('compact-b', 'first-turn'),
+      event('task_complete', { turn_id: 'first-turn' }),
+      event('task_started', { turn_id: 'legacy-turn' }),
+      event('context_compacted'),
+      { type: 'compacted', payload: { message: '', replacement_history: [] } },
+    ];
+    await writeFile(transcriptPath, records.map((record, index) => JSON.stringify({
+      ...record, timestamp: new Date(Date.UTC(2026, 10, 18, 0, 0, index)).toISOString(),
+    })).join('\n') + '\n');
+
+    await withIsolatedDatabase(async () => {
+      const sessionId = 'app-compaction-history';
+      sessionsDb.createAppSession(sessionId, 'codex', tempRoot);
+      sessionsDb.assignProviderSessionId(sessionId, providerSessionId);
+      await new CodexSessionSynchronizer().synchronize();
+
+      const provider = new CodexSessionsProvider();
+      const history = await provider.fetchHistory(sessionId);
+      assert.deepEqual(history.messages.map((row) => [row.id, row.turnId, row.compact?.boundaryIndex]), [
+        ['compact-a', 'first-turn', 0],
+        ['compact-b', 'first-turn', 1],
+        ['codex-compaction:legacy-turn:0', 'legacy-turn', 0],
+      ]);
+      assert.ok(history.messages.every((row) => row.compact?.phase === 'done'));
+      assert.equal(history.messages[0].compact?.summary, 'Native summary');
+      assert.equal(history.messages[0].compact?.preTokens, 200);
+      assert.equal(history.messages[0].compact?.postTokens, 20);
+      assert.equal(history.messages[1].compact?.summary, undefined);
+      assert.equal(history.messages[1].compact?.preTokens, undefined);
+      assert.equal((await provider.fetchHistory(sessionId)).messages[2].id, history.messages[2].id);
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});

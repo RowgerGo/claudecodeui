@@ -9,7 +9,8 @@ import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.
 import { codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
 import { CodexSessionsProvider } from '@/modules/providers/list/codex/codex-sessions.provider.js';
 import { parseFilesInputTag } from '@/shared/image-attachments.js';
-import type { AnyRecord, NormalizedMessage, ProviderRuntimeContext } from '@/shared/types.js';
+import type { AnyRecord, ChatCodexOperation, CodexControlHooks, CodexGoal, NormalizedMessage, ProviderRuntimeContext } from '@/shared/types.js';
+import { AppError } from '@/shared/utils.js';
 
 const context: ProviderRuntimeContext = {
   resolveProviderSessionId: () => null,
@@ -46,6 +47,7 @@ async function useFakeAppServer(t: TestContext, mode: 'steer' | 'crash' | 'fail'
       fs.appendFileSync(log, line + '\\n');
       const { id, method, params } = message;
       if (method === 'initialize') return reply(id, {});
+      if (method === 'thread/goal/get') return reply(id, { goal: null });
       if (method === 'thread/start' || method === 'thread/resume') return reply(id, { thread: { id: threadId } });
       if (method === 'turn/start') {
         // The real server can publish start before replying to the RPC.
@@ -238,3 +240,251 @@ for (const mode of ['fail', 'crash'] as const) {
     assert.equal(Boolean(terminal[0].turnSettleConfirmed), mode === 'fail');
   });
 }
+
+function scriptedControlServer(t: TestContext, initialGoal: CodexGoal | null = null) {
+  const threadId = 'native-control-thread';
+  const calls: { method: string; params: AnyRecord }[] = [];
+  const turns = new Map<string, ReturnType<typeof recordMessages>>();
+  const goals: (CodexGoal | null)[] = [];
+  let goal = initialGoal;
+  let notify: (method: string, params: unknown) => void = () => {};
+  let exit: (reason: string) => void = () => {};
+  let acceptCount = 0;
+  let connections = 0;
+  let activeRun = false;
+  let history = true;
+  let threadMetadata: AnyRecord = {};
+  let setFailure: Error | undefined;
+  let boundThread: string | undefined;
+  let onCompactionStart: (() => void) | undefined;
+  const hooks: CodexControlHooks = {
+    bindThread: (id) => { boundThread = id; },
+    isTurnRunning: () => activeRun,
+    startTurn: (_id, turnId) => {
+      const recorded = recordMessages();
+      turns.set(turnId, recorded);
+      return recorded.writer;
+    },
+    publishGoal: (state) => { goals.push(state); },
+    onAccepted: () => { acceptCount++; },
+    onIdle: () => {},
+  };
+  const send = (method: string, params: AnyRecord) => notify(method, { threadId, ...params });
+  t.mock.method(codexAppServer, 'withChatConnection', async (run: Parameters<typeof codexAppServer.withChatConnection>[0]) => {
+    connections++;
+    return run({
+      onNotification(handler) {
+        notify = handler;
+        return () => {};
+      },
+      onExit(handler) {
+        exit = handler;
+        return () => {};
+      },
+      async call(method, value) {
+        const params = value as AnyRecord;
+        calls.push({ method, params });
+        switch (method) {
+          case 'thread/start':
+          case 'thread/resume':
+            return { thread: { id: threadId } };
+          case 'thread/read':
+            return { thread: { id: threadId, ...threadMetadata } };
+          case 'thread/goal/get':
+            return { goal };
+          case 'thread/goal/set':
+            assert.equal(boundThread ?? initialGoal?.threadId, threadId);
+            if (setFailure) {
+              const error = setFailure;
+              setFailure = undefined;
+              throw error;
+            }
+            goal = {
+              ...(goal ?? {
+                threadId, status: 'active', objective: '', tokenBudget: null, tokensUsed: 0,
+                timeUsedSeconds: 0, createdAt: 1, updatedAt: 1,
+              }),
+              ...(params.objective === undefined ? {} : { objective: params.objective }),
+              ...(params.status === undefined ? {} : { status: params.status }),
+            };
+            return { goal };
+          case 'thread/goal/clear': {
+            const cleared = Boolean(goal);
+            goal = null;
+            send('thread/goal/cleared', {});
+            return { cleared };
+          }
+          case 'thread/turns/list':
+            return { data: history ? [{ id: 'prior-turn', status: 'completed' }] : [] };
+          case 'thread/compact/start':
+            onCompactionStart?.();
+            return {};
+          case 'turn/start': {
+            const turn = { id: 'queued-turn', status: 'inProgress' };
+            send('turn/started', { turn });
+            send('turn/completed', { turn: { ...turn, status: 'completed' } });
+            return { turn };
+          }
+          case 'turn/steer':
+            return { turnId: params.expectedTurnId };
+          case 'turn/interrupt':
+            send('turn/completed', { turn: { id: params.turnId, status: 'interrupted' } });
+            return {};
+          default:
+            throw new Error(`Unexpected request: ${method}`);
+        }
+      },
+    });
+  });
+
+  const appSessionId = 'app-control-session';
+  const existingContext = { ...context, resolveProviderSessionId: () => threadId };
+  return {
+    calls, hooks, turns, goals, send, appSessionId,
+    compact: () => codexRuntime.controlCodex(appSessionId, {}, { kind: 'compact' }, hooks, existingContext),
+    goal: (operation: Extract<ChatCodexOperation, { kind: 'goal' }>, exists = true) =>
+      codexRuntime.controlCodex(appSessionId, {}, operation, hooks, exists ? existingContext : context),
+    sendQueued: () => codexRuntime.run('Queued input', { sessionId: appSessionId, codexHooks: hooks }, recordMessages().writer, existingContext),
+    turn: (id: string, status?: 'completed' | 'interrupted' | 'failed') => {
+      send(status ? 'turn/completed' : 'turn/started', { turn: { id, status: status ?? 'inProgress' } });
+    },
+    compactionItem: (turn: string, finished: boolean) => {
+      send(finished ? 'item/completed' : 'item/started', { turnId: turn, item: { id: 'compaction-item', type: 'contextCompaction' } });
+    },
+    failConnection: () => exit('test process exited'),
+    setActiveRun: (active: boolean) => { activeRun = active; },
+    setHistory: (hasHistory: boolean) => { history = hasHistory; },
+    setThreadMetadata: (metadata: AnyRecord) => { threadMetadata = metadata; },
+    failNextGoalSet: () => {
+      setFailure = new AppError('native goal set failed', { code: 'CODEX_APP_SERVER_ERROR' });
+    },
+    beforeCompactionReply: (callback: () => void) => { onCompactionStart = callback; },
+    get accepted() { return acceptCount; },
+    get connections() { return connections; },
+  };
+}
+
+async function waitForControl(predicate: () => boolean) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.ok(predicate(), 'the control operation did not reach the expected stage');
+}
+
+const pausedGoal: CodexGoal = {
+  threadId: 'native-control-thread', status: 'paused', objective: 'Existing objective', tokenBudget: 900,
+  tokensUsed: 120, timeUsedSeconds: 12, createdAt: 1, updatedAt: 10,
+};
+
+test('manual compaction reserves the session before its first await and tracks one native item', async (t) => {
+  const server = scriptedControlServer(t, pausedGoal);
+  server.beforeCompactionReply(() => {
+    // Simulate both event-before-RPC and the item completion arriving first.
+    server.compactionItem('compact-turn', true);
+    server.compactionItem('compact-turn', false);
+  });
+  const compaction = server.compact();
+  assert.deepEqual(await server.compact(), { status: 'rejected', code: 'COMPACT_BUSY' });
+  assert.deepEqual(await server.goal({ kind: 'goal', action: 'resume' }), {
+    status: 'rejected', code: 'GOAL_COMPACTION_IN_PROGRESS',
+  });
+  await waitForControl(() => server.accepted === 1);
+  const messages = server.turns.get('compact-turn')?.messages;
+  assert.ok(messages);
+  assert.equal(codexRuntime.isCodexControlBlockingTurn(server.appSessionId), true);
+  assert.deepEqual(messages.filter((row) => row.compact).map((row) => row.compact?.phase), ['running']);
+
+  server.turn('unrelated-turn', 'completed');
+  assert.equal(messages.some((row) => row.kind === 'complete'), false);
+  server.turn('compact-turn', 'completed');
+  assert.deepEqual(await compaction, { status: 'completed' });
+  assert.equal(codexRuntime.isCodexControlBlockingTurn(server.appSessionId), false);
+  const rows = messages.filter((row) => row.compact);
+  assert.deepEqual(rows.map((row) => [row.id, row.compact?.phase]), [['compaction-item', 'running'], ['compaction-item', 'done']]);
+  assert.deepEqual(rows[1].compact, {
+    phase: 'done', trigger: 'manual', nativeItemId: 'compaction-item', nativeTurnId: 'compact-turn', boundaryIndex: 0,
+  });
+  assert.equal(messages.filter((row) => row.kind === 'complete').length, 1);
+  assert.equal(server.calls.filter(({ method }) => method === 'thread/compact/start').length, 1);
+  assert.equal(server.calls.find(({ method }) => method === 'thread/resume')?.params.approvalPolicy, undefined);
+  assert.equal(server.calls.find(({ method }) => method === 'thread/resume')?.params.sandbox, undefined);
+});
+
+for (const outcome of ['failed', 'interrupted', 'crashed'] as const) {
+  test(`manual compaction releases its position when it is ${outcome}`, async (t) => {
+    const server = scriptedControlServer(t);
+    const compaction = server.compact();
+    await waitForControl(() => server.accepted === 1);
+    server.turn('compact-turn');
+    server.compactionItem('compact-turn', false);
+    if (outcome === 'crashed') server.failConnection();
+    else server.turn('compact-turn', outcome);
+
+    const result = await compaction;
+    assert.equal(result.status, 'failed');
+    assert.equal(codexRuntime.isCodexControlBlockingTurn(server.appSessionId), false);
+    const messages = server.turns.get('compact-turn')?.messages;
+    assert.ok(messages);
+    assert.deepEqual(messages.filter((row) => row.compact).map((row) => row.compact?.phase), ['running', 'failed']);
+    assert.equal(messages.filter((row) => row.kind === 'complete').length, 1);
+    assert.equal(messages.filter((row) => row.kind === 'error').length, 0);
+  });
+}
+
+test('manual compaction skips blank, busy and goal-active threads without a mutation', async (t) => {
+  const server = scriptedControlServer(t, { ...pausedGoal, status: 'active' });
+  const noThread = await codexRuntime.controlCodex('blank', {}, { kind: 'compact' }, server.hooks, context);
+  assert.deepEqual(noThread, { status: 'rejected', code: 'COMPACT_NO_HISTORY' });
+  assert.equal(server.connections, 0);
+
+  server.setActiveRun(true);
+  assert.deepEqual(await server.compact(), { status: 'rejected', code: 'COMPACT_BUSY' });
+  server.setActiveRun(false);
+  assert.deepEqual(await server.compact(), { status: 'rejected', code: 'COMPACT_GOAL_ACTIVE' });
+  assert.equal(server.calls.some(({ method }) => method === 'thread/compact/start'), false);
+});
+
+test('a persisted thread with no turns does not send a compaction RPC', async (t) => {
+  const server = scriptedControlServer(t);
+  server.setHistory(false);
+  assert.deepEqual(await server.compact(), { status: 'rejected', code: 'COMPACT_NO_HISTORY' });
+  assert.equal(server.calls.some(({ method }) => method === 'thread/resume' || method === 'thread/compact/start'), false);
+});
+
+test('reopening a thread for compaction restores the provider-owned rollout settings', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cloudcli-codex-control-settings-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const rollout = path.join(directory, 'rollout.jsonl');
+  await writeFile(rollout, [
+    { type: 'turn_context', payload: { sandbox_policy: 'read-only', approval_policy: 'on-request' } },
+    {
+      type: 'turn_context',
+      payload: {
+        sandbox_policy: { type: 'workspace-write', writable_roots: [directory], network_access: false },
+        approval_policy: 'never',
+      },
+    },
+  ].map((entry) => JSON.stringify(entry)).join('\n') + '\n');
+  const server = scriptedControlServer(t);
+  server.setThreadMetadata({
+    path: rollout, cwd: directory, model: 'persisted-model', reasoningEffort: 'medium',
+  });
+  server.beforeCompactionReply(() => {
+    server.compactionItem('compact-turn', true);
+    server.turn('compact-turn', 'completed');
+  });
+  assert.deepEqual(await server.compact(), { status: 'completed' });
+  assert.deepEqual(server.calls.find(({ method }) => method === 'thread/resume')?.params, {
+    threadId: pausedGoal.threadId,
+    excludeTurns: true,
+    cwd: directory,
+    model: 'persisted-model',
+    approvalPolicy: 'never',
+    sandbox: 'workspace-write',
+    config: {
+      model_reasoning_effort: 'medium',
+      sandbox_workspace_write: { writable_roots: [directory], network_access: false },
+    },
+  });
+});

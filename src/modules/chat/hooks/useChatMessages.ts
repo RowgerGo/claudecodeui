@@ -83,6 +83,67 @@ function parseTaskNotification(content: string): ParsedTaskNotification | null {
 /** The CLI acknowledges a compaction in the stream with the bare word. */
 const COMPACTION_NOTICE = /^Compacted\.?$/;
 
+type CodexCompactionRows = {
+  byItemId: Map<string, number>;
+  byBoundary: Map<string, number>;
+  sourceByRow: Map<number, NormalizedMessage>;
+};
+
+function mergeCodexCompactionRow(
+  message: NormalizedMessage,
+  converted: ChatMessage[],
+  sharedMetadata: Partial<ChatMessage>,
+  rows: CodexCompactionRows,
+) {
+  const compact = message.compact!;
+  const itemId = compact.nativeItemId;
+  const boundary = compact.nativeTurnId && compact.boundaryIndex !== undefined
+    ? `${compact.nativeTurnId}:${compact.boundaryIndex}`
+    : undefined;
+  const itemIndex = itemId ? rows.byItemId.get(itemId) : undefined;
+  const boundaryIndex = boundary ? rows.byBoundary.get(boundary) : undefined;
+  const boundaryItemId = boundaryIndex === undefined ? undefined : converted[boundaryIndex]?.compact?.nativeItemId;
+  // Older history has only the turn and the boundary. Never merge two actual
+  // native items just because both ran in the same turn.
+  const sameBoundary = boundaryIndex !== undefined && (!itemId || !boundaryItemId || itemId === boundaryItemId);
+  const rowIndex = itemIndex ?? (sameBoundary ? boundaryIndex : converted.length);
+  const previous = converted[rowIndex];
+  const previousSource = rows.sourceByRow.get(rowIndex);
+  const isLive = message.seq !== undefined || message.turnId !== undefined;
+  const previousIsLive = previousSource?.seq !== undefined || previousSource?.turnId !== undefined;
+  // A history checkpoint can appear before the app server has finished the
+  // turn. The live phase owns progress while history contributes the summary.
+  const preferIncoming = !previousSource || (isLive !== previousIsLive ? isLive
+    : compact.phase === 'running' && previous.compact?.phase !== 'running' ? false
+      : (message.seq ?? 0) >= (previousSource.seq ?? 0));
+  const previousCompact = previous?.compact;
+  const phase = preferIncoming ? compact.phase : previousCompact?.phase ?? compact.phase;
+  const summary = compact.summary ?? previousCompact?.summary;
+  const merged = {
+    phase,
+    nativeItemId: itemId ?? previousCompact?.nativeItemId,
+    nativeTurnId: compact.nativeTurnId ?? previousCompact?.nativeTurnId,
+    boundaryIndex: compact.boundaryIndex ?? previousCompact?.boundaryIndex,
+    trigger: compact.trigger ?? previousCompact?.trigger,
+    preTokens: compact.preTokens ?? previousCompact?.preTokens,
+    postTokens: compact.postTokens ?? previousCompact?.postTokens,
+    durationMs: compact.durationMs ?? previousCompact?.durationMs,
+    summary,
+    error: preferIncoming ? compact.error : previousCompact?.error,
+  };
+  converted[rowIndex] = {
+    ...sharedMetadata,
+    type: 'assistant',
+    content: (preferIncoming ? message.content : previous?.content) || '',
+    timestamp: previous?.timestamp ?? message.timestamp,
+    compact: merged,
+    compactSummary: summary,
+  };
+  if (itemId) rows.byItemId.set(itemId, rowIndex);
+  if (boundary && (boundaryIndex === undefined || sameBoundary)) rows.byBoundary.set(boundary, rowIndex);
+  if (preferIncoming) rows.sourceByRow.set(rowIndex, message);
+}
+
 /**
  * Draws a compaction as one row, whichever order its parts arrive in.
  *
@@ -334,11 +395,12 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
   // Whether any row describes a compaction at all. Used only to suppress the
   // CLI's own one-word acknowledgement, which says strictly less than the row
   // beside it — but is all there is when no such row exists.
-  const hasCompactionRow = messages.some((msg) => msg.compact);
+  const hasCompactionRow = messages.some((msg) => msg.provider !== 'codex' && msg.compact);
   // Summary text already folded into a compaction row: the CLI writes the
   // summary twice, once as the flagged row that carries it into the next turn
   // and once into the live stream, and only one copy is flagged.
   const foldedSummaries = new Set<string>();
+  const codexCompactionRows: CodexCompactionRows = { byItemId: new Map(), byBoundary: new Map(), sourceByRow: new Map() };
 
   for (const msg of messages) {
     // Subagent rows were folded into their container's timeline above.
@@ -389,7 +451,12 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
       model: msg.model,
     };
 
-    if (appendCompactionRow(msg, converted, sharedMetadata, {
+    if (msg.provider === 'codex' && msg.compact) {
+      mergeCodexCompactionRow(msg, converted, sharedMetadata, codexCompactionRows);
+      continue;
+    }
+
+    if (msg.provider !== 'codex' && appendCompactionRow(msg, converted, sharedMetadata, {
       hasCompactionRow,
       foldedSummaries,
     })) {

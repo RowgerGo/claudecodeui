@@ -10,9 +10,9 @@ import {
   SIDE_QUESTION_ANSWER_SEPARATOR,
 } from '@/shared/utils.js';
 
-/** Local JSON-RPC transport for Codex chat turns, forks and side questions. */
+/** Local JSON-RPC transport for Codex chat sessions, forks and side questions. */
 
-/** How long a single request may take before the child is killed. */
+/** How long to wait for an individual request response. */
 const REQUEST_TIMEOUT_MS = 30_000;
 
 /**
@@ -55,13 +55,11 @@ export type CodexThreadFork = {
 };
 
 /**
- * Runs one exchange against a freshly spawned `codex app-server`.
+ * Runs a callback against a freshly spawned `codex app-server`.
  *
- * A process per operation rather than a pooled long-lived one: the handshake
- * costs a fraction of a second, forking happens at most once per user action,
- * and a shared child would need lifecycle handling — restarts, back-pressure,
- * a crash taking every pending fork with it — for no measurable gain next to
- * the model turn that follows.
+ * The callback owns the lifetime. Chat can keep one process attached to its
+ * native thread across goal turns. Forks and side questions each have an
+ * isolated process that closes when their operation ends.
  */
 async function withAppServer<T>(
   run: (helpers: {
@@ -236,9 +234,7 @@ async function withAppServer<T>(
       killOnAbort();
       throw signal.reason;
     }
-    // `capabilities` is deliberately empty. `thread/fork` with `lastTurnId` is
-    // in the stable protocol; only `beforeTurnId` and the turn-listing methods
-    // are gated behind `experimentalApi`, and neither is needed here.
+    // Every request and notification used here is part of the stable protocol.
     await call('initialize', {
       clientInfo: { name: 'cloudcli', title: 'CloudCLI', version: '1' },
       capabilities: {},
@@ -264,7 +260,7 @@ async function withAppServer<T>(
 
 /** Used by the Codex providers and their tests to speak to the bundled CLI. */
 export const codexAppServer = {
-  /** Used by the main chat runtime to keep the transport open through a turn. */
+  /** Used by the main chat runtime to own the transport for one thread. */
   withChatConnection<T>(run: Parameters<typeof withAppServer<T>>[0], signal: AbortSignal): Promise<T> {
     // Main chat historically used exec's non-interactive permissions. Keep
     // its configured sandbox and explicitly decline any escalation requested.

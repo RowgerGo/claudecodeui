@@ -10,6 +10,7 @@ import type { IProviderSessions } from '@/shared/interfaces.js';
 import { prepareTranscriptMessages } from '@/shared/message-unification.js';
 import type {
   AnyRecord,
+  CompactionInfo,
   FetchHistoryOptions,
   FetchHistoryResult,
   MemoryCitation,
@@ -1275,6 +1276,84 @@ const CODEX_COLLABORATION_CONTROL_TOOLS = new Set([
   'wait_agent',
 ]);
 
+/** One checkpoint may appear as a rollout boundary, a legacy event, and a typed item. */
+function createCodexCompactionReader(messages: AnyRecord[]) {
+  type RecordSource = 'checkpoint' | 'legacy_event' | 'completed_item';
+  type CompactionRow = {
+    type: 'compaction';
+    uuid: string;
+    timestamp: string;
+    compact: CompactionInfo;
+  };
+  type Boundary = { row: CompactionRow; sources: Set<RecordSource> };
+
+  const byItemId = new Map<string, Boundary>();
+  const nextBoundaryIndex = new Map<string | undefined, number>();
+  let previousBoundary: Boundary | undefined;
+
+  const readCount = (value: unknown): number | undefined => (
+    typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+  );
+
+  return (entryType: unknown, payload: AnyRecord, timestamp: string, currentTurnId?: string): boolean => {
+    const item = readObjectRecord(payload.item);
+    const isCompletedItem = entryType === 'event_msg' && payload.type === 'item_completed'
+      && (item?.type === 'ContextCompaction' || item?.type === 'contextCompaction');
+    let source: RecordSource;
+    if (isCompletedItem) {
+      source = 'completed_item';
+    } else if (entryType === 'compacted') {
+      source = 'checkpoint';
+    } else if (entryType === 'event_msg' && payload.type === 'context_compacted') {
+      source = 'legacy_event';
+    } else {
+      return false;
+    }
+
+    const nativeItemId = readNonEmptyString(item?.id ?? payload.item_id ?? payload.id);
+    const nativeTurnId = readNonEmptyString(payload.turn_id) ?? currentTurnId;
+    const previousItemId = previousBoundary?.row.compact.nativeItemId;
+    let boundary = nativeItemId ? byItemId.get(nativeItemId) : undefined;
+    // Old checkpoints have no item ID. Pair adjacent representations at the
+    // same transcript boundary without folding two checkpoints in one turn.
+    if (!boundary && previousBoundary && messages.at(-1) === previousBoundary.row
+      && previousBoundary.row.compact.nativeTurnId === nativeTurnId
+      && !previousBoundary.sources.has(source) && !(previousItemId && nativeItemId)) {
+      boundary = previousBoundary;
+    }
+
+    if (!boundary) {
+      const boundaryIndex = nextBoundaryIndex.get(nativeTurnId) ?? 0;
+      nextBoundaryIndex.set(nativeTurnId, boundaryIndex + 1);
+      const row: CompactionRow = {
+        type: 'compaction',
+        uuid: nativeItemId ?? `codex-compaction:${nativeTurnId ?? timestamp}:${boundaryIndex}`,
+        timestamp,
+        compact: { phase: 'done', nativeTurnId, boundaryIndex },
+      };
+      boundary = { row, sources: new Set() };
+      messages.push(row);
+      previousBoundary = boundary;
+    }
+
+    boundary.sources.add(source);
+    const { compact } = boundary.row;
+    if (nativeItemId) {
+      byItemId.set(nativeItemId, boundary);
+      boundary.row.uuid = nativeItemId;
+      compact.nativeItemId = nativeItemId;
+    }
+    const summary = readNonEmptyString(item?.summary ?? payload.summary ?? payload.message);
+    const trigger = item?.trigger ?? payload.trigger;
+    if (summary?.trim()) compact.summary = summary;
+    if (trigger === 'manual' || trigger === 'auto') compact.trigger = trigger;
+    compact.preTokens ??= readCount(item?.pre_tokens ?? payload.pre_tokens);
+    compact.postTokens ??= readCount(item?.post_tokens ?? payload.post_tokens);
+    compact.durationMs ??= readCount(item?.duration_ms ?? payload.duration_ms);
+    return true;
+  };
+}
+
 // ─── Transcript reader ──────────────────────────────────────────────────────
 
 /**
@@ -1320,6 +1399,7 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
   const subagentsByCallId = new Map<string, CodexSubagentRecord>();
   const subagentsByPath = new Map<string, CodexSubagentRecord>();
   const turns = createCodexTurnTracker();
+  const readCompaction = createCodexCompactionReader(messages);
   /** Turns whose prompt already carries the anchor, so only the first does. */
   const anchoredTurnIds = new Set<string>();
   /** New rollouts can expose the same user item as both an item and a legacy event. */
@@ -1364,6 +1444,9 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
     // that produce no transcript entry of their own, and each of those
     // branches ends in a `continue`.
     turns.observe(entry.type, payload);
+    if (readCompaction(entry.type, payload, timestamp, turns.getCurrentTurnId())) {
+      continue;
+    }
 
     // ── event_msg ──────────────────────────────────────────────────────────
     if (entry.type === 'event_msg') {
@@ -1436,11 +1519,6 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
           timestamp,
           content: payload.reason === 'interrupted' ? 'Turn interrupted' : `Turn aborted (${String(payload.reason ?? 'unknown')})`,
         });
-        continue;
-      }
-
-      if (payload.type === 'context_compacted') {
-        messages.push({ type: 'status_note', timestamp, content: 'Context compacted' });
         continue;
       }
 
@@ -2044,6 +2122,19 @@ export class CodexSessionsProvider implements IProviderSessions {
   private normalizeHistoryEntry(raw: AnyRecord, sessionId: string | null): NormalizedMessage[] {
     const ts = raw.timestamp || new Date().toISOString();
     const baseId = raw.uuid || generateMessageId('codex');
+
+    if (raw.type === 'compaction') {
+      return [createNormalizedMessage({
+        id: baseId,
+        sessionId,
+        timestamp: ts,
+        provider: PROVIDER,
+        kind: 'text',
+        role: 'assistant',
+        turnId: raw.compact.nativeTurnId,
+        compact: raw.compact,
+      })];
+    }
 
     if (raw.type === 'status_note' && typeof raw.content === 'string') {
       return [createNormalizedMessage({

@@ -269,7 +269,7 @@ function dedupeAdjacentAssistantEchoes(merged: NormalizedMessage[]): NormalizedM
   const out: NormalizedMessage[] = [];
   for (const m of merged) {
     const prev = out[out.length - 1];
-    if (prev) {
+    if (prev && !m.compact && !prev.compact) {
       if (prev.kind === 'stream_delta' && m.kind === 'text' && m.role === 'assistant') {
         const ps = (prev.content || '').trim();
         const ms = (m.content || '').trim();
@@ -313,6 +313,9 @@ function pruneRealtimeSupersededByServer(
   const reconciledRealtimeMessages = removeOptimisticUserEchoes(serverMessages, realtimeMessages);
 
   return reconciledRealtimeMessages.filter((message) => {
+    // History knows the summary, while the live item knows whether the turn
+    // has finished. The compaction projection combines the two sources.
+    if (message.provider === 'codex' && message.compact) return true;
     if (serverIds.has(message.id)) {
       return false;
     }
@@ -356,10 +359,7 @@ function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[
   const serverIds = new Set(server.map((message) => message.id));
   const reconciledRealtime = removeOptimisticUserEchoes(server, realtime);
   const extra = reconciledRealtime.filter((message) => {
-    if (serverIds.has(message.id)) {
-      return false;
-    }
-    return true;
+    return !serverIds.has(message.id) || (message.provider === 'codex' && Boolean(message.compact));
   });
 
   if (extra.length === 0) {

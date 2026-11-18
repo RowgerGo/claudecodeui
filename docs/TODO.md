@@ -22,14 +22,14 @@
 
 ### 提交 2 · 完成手动上下文压缩
 
-- [ ] **2.1 在空闲线程上发起一次压缩**
+- [x] **2.1 在空闲线程上发起一次压缩**
 
   1. `/compact` 接受零个参数。尚无可压缩历史时直接提示，空白聊天无需分配线程。已有历史时由后端取得原生线程，使用同一会话的连接，必要时恢复原线程并沿用模型、目录和权限设置。
   2. 将忙碌检查和占用会话放进同一次调度操作，同时检查当前轮、已受理的压缩和原生目标状态。首版仅允许空闲且目标未激活的线程手动压缩。先订阅通知，再调用 `thread/compact/start({ threadId })`。保护也适用于相反方向，压缩进行时先拒绝会立即开轮的目标创建、替换或恢复。0.170.0 的压缩处理会先停止该线程已有的任务。 [运行时](../server/modules/providers/list/codex/codex-runtime.provider.ts) · [原生压缩实现](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/core/src/session/handlers.rs#L271-L278)
 
   **验收条件**　空白聊天、带多余参数、当前轮忙碌或目标为 `active` 时均不发出压缩 RPC。空闲会话双击只触发一次压缩。在两个标签页同时压缩和恢复目标，只有先获准的操作进入 Codex，另一方收到可理解的提示，现有轮次没有被替换。
 
-- [ ] **2.2 展示压缩进度，并让刷新后的历史与实时页面一致**
+- [x] **2.2 展示压缩进度，并让刷新后的历史与实时页面一致**
 
   1. `thread/compact/start` 返回 `{}` 时记录「已受理」。按 `threadId`、`turnId`、`item.id` 关联 `contextCompaction` 的 `item/started` 和 `item/completed`。用同一行显示进度，在匹配轮次成功结束后标记完成。对中断、原生错误和子进程退出收尾并释放对应运行位置。 [官方压缩协议测试](https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/app-server/tests/suite/v2/compaction.rs#L534-L560)
   2. 将实时条目和历史中的 `context_compacted` 等压缩记录映射到现有 `CompactionInfo`。按原生 ID 合并，旧记录缺 ID 时按对应轮次和边界去重。手动和自动压缩都走现有压缩行，只显示原生实际提供的摘要及用量。 [Codex 历史读取](../server/modules/providers/list/codex/codex-sessions.provider.ts) · [压缩行合并](../src/modules/chat/hooks/useChatMessages.ts) · [压缩行渲染](../src/modules/chat/transcript/MessageComponent.tsx)

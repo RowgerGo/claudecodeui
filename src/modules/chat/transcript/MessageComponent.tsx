@@ -64,7 +64,7 @@ function SideQuestionDismissButton({ label, onDismiss }: { label: string; onDism
  * transcript entry — user turn, assistant turn, or a tool call and its result.
  */
 const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider, onEditMessage, onForkFromMessage }: MessageComponentProps) => {
-  const { t } = useTranslation('chat');
+  const { t, i18n } = useTranslation('chat');
   // A side question never groups with its neighbours: it is drawn as its own
   // tinted aside regardless of what came before or after it.
   const isGrouped = Boolean(prevMessage) && !message.sideQuestion && !prevMessage?.sideQuestion && prevMessage?.type === message.type &&
@@ -266,7 +266,18 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
               }`}
             />
             <span className="text-xs text-gray-500 dark:text-gray-400">
-              {message.content || t('chat:misc.compacted', 'Compacted')}
+              {provider === 'codex' ? (
+                <>
+                  {t(`commands.compactionPhases.${message.compact.phase}`)}
+                  {message.compact.preTokens !== undefined && message.compact.postTokens !== undefined
+                    ? ` · ${t('commands.compactionTokens', {
+                      before: message.compact.preTokens.toLocaleString(i18n.resolvedLanguage),
+                      after: message.compact.postTokens.toLocaleString(i18n.resolvedLanguage),
+                    })}`
+                    : null}
+                  {message.compact.error ? ` · ${message.compact.error}` : null}
+                </>
+              ) : message.content || t('chat:misc.compacted', 'Compacted')}
             </span>
           </div>
           {message.compactSummary && (

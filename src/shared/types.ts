@@ -398,6 +398,11 @@ export type SubagentActivity = {
  */
 export type CompactionInfo = {
   phase: 'running' | 'done' | 'failed';
+  nativeItemId?: string;
+  nativeTurnId?: string;
+  /** Ordinal of the compaction in the native turn, including legacy history without item ids. */
+  boundaryIndex?: number;
+  summary?: string;
   trigger?: 'manual' | 'auto';
   preTokens?: number;
   postTokens?: number;

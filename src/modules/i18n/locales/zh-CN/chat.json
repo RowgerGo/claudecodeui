@@ -2,6 +2,12 @@
   "commands": {
     "codexCompact": "压缩此 Codex 聊天的上下文",
     "codexGoal": "查看或管理此 Codex 聊天的目标",
+    "compactionPhases": {
+      "running": "正在压缩上下文…",
+      "done": "上下文已压缩",
+      "failed": "上下文压缩失败"
+    },
+    "compactionTokens": "{{before}} → {{after}} 个 token",
     "compactLabel": "上下文压缩",
     "goalLabel": "目标",
     "pending": "正在发送请求…",
@@ -39,6 +45,8 @@
       "COMPACT_NO_HISTORY": "暂无可压缩的聊天历史。",
       "COMPACT_BUSY": "请等待 Codex 当前轮次或压缩结束。",
       "COMPACT_GOAL_ACTIVE": "请暂停当前目标后再压缩上下文。",
+      "COMPACT_FAILED": "上下文压缩失败。{{message}}",
+      "COMPACT_INTERRUPTED": "上下文压缩已中断。{{message}}",
       "GOAL_COMPACTION_IN_PROGRESS": "请等待上下文压缩完成后再开始或恢复目标。",
       "GOAL_NO_GOAL": "尚无目标。",
       "GOAL_REPLACEMENT_REQUIRED": "请确认替换目标。",

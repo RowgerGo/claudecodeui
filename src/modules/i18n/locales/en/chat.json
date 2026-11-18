@@ -2,6 +2,12 @@
   "commands": {
     "codexCompact": "Compact this Codex conversation",
     "codexGoal": "View or manage this Codex conversation’s goal",
+    "compactionPhases": {
+      "running": "Compacting context…",
+      "done": "Context compacted",
+      "failed": "Context compaction failed"
+    },
+    "compactionTokens": "{{before}} → {{after}} tokens",
     "compactLabel": "Context compaction",
     "goalLabel": "Goal",
     "pending": "Sending request…",
@@ -39,6 +45,8 @@
       "COMPACT_NO_HISTORY": "There is no conversation history to compact yet.",
       "COMPACT_BUSY": "Wait for the current Codex turn or compaction to finish.",
       "COMPACT_GOAL_ACTIVE": "Pause the active goal before compacting context.",
+      "COMPACT_FAILED": "Context compaction failed. {{message}}",
+      "COMPACT_INTERRUPTED": "Context compaction was interrupted. {{message}}",
       "GOAL_COMPACTION_IN_PROGRESS": "Wait for context compaction to finish before starting or resuming a goal.",
       "GOAL_NO_GOAL": "There is no goal yet.",
       "GOAL_REPLACEMENT_REQUIRED": "Confirm the goal replacement.",

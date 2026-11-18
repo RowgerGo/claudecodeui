@@ -147,3 +147,50 @@ describe('compaction rows and the projection cache', () => {
     expect(second[0]).not.toBe(firstRow);
   });
 });
+
+describe('Codex compaction boundaries', () => {
+  const compact = (fields: Partial<NonNullable<NormalizedMessage['compact']>> = {}, message: Partial<NormalizedMessage> = {}) => row({
+    provider: 'codex',
+    compact: { phase: 'done', nativeItemId: 'item-1', nativeTurnId: 'turn-1', boundaryIndex: 0, ...fields },
+    ...message,
+  });
+
+  it('keeps one live progress row and folds in the history checkpoint while the turn is running', () => {
+    const history = compact({ summary: 'Native summary', preTokens: 200, postTokens: 100 });
+    const running = compact({ phase: 'running', trigger: 'manual' }, { turnId: 'turn-1', seq: 7 });
+    const terminal = compact({ phase: 'done', trigger: 'manual' }, { turnId: 'turn-1', seq: 8 });
+    const message = row({ provider: 'codex', content: 'Between rows' });
+
+    expect(normalizedToChatMessages([history, message, running])).toMatchObject([
+      { compact: { phase: 'running', trigger: 'manual', preTokens: 200, postTokens: 100 }, compactSummary: 'Native summary' },
+      { content: 'Between rows' },
+    ]);
+    expect(normalizedToChatMessages([running, terminal, history])).toMatchObject([
+      { compact: { phase: 'done', nativeItemId: 'item-1', trigger: 'manual' }, compactSummary: 'Native summary' },
+    ]);
+  });
+
+  it('associates an old boundary without a native item id using the native turn and index', () => {
+    const firstOld = compact({ nativeItemId: undefined, nativeTurnId: 'older', summary: 'Earlier summary' });
+    const oldCheckpoint = compact({ nativeItemId: undefined, summary: 'Matched summary' });
+    const firstNative = compact({ trigger: 'auto' }, { turnId: 'turn-1', seq: 2 });
+    const secondNative = compact({ nativeItemId: 'item-2', boundaryIndex: 1, trigger: 'manual' });
+
+    expect(normalizedToChatMessages([firstOld, oldCheckpoint, firstNative, secondNative])).toMatchObject([
+      { compactSummary: 'Earlier summary' },
+      { compact: { nativeItemId: 'item-1', trigger: 'auto' }, compactSummary: 'Matched summary' },
+      { compact: { nativeItemId: 'item-2', trigger: 'manual' } },
+    ]);
+  });
+
+  it('keeps failures terminal when a start is replayed and never folds distinct native ids', () => {
+    const failed = compact({ phase: 'failed', error: 'interrupted' }, { turnId: 'turn-1', seq: 7 });
+    const stale = compact({ phase: 'running' }, { turnId: 'turn-1', seq: 6 });
+    const second = compact({ nativeItemId: 'item-2' });
+
+    expect(normalizedToChatMessages([failed, stale, second])).toMatchObject([
+      { compact: { phase: 'failed', error: 'interrupted' } },
+      { compact: { phase: 'done', nativeItemId: 'item-2' } },
+    ]);
+  });
+});
