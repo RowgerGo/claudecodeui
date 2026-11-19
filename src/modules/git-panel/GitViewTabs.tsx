@@ -28,7 +28,7 @@ export default function GitViewTabs({ activeView, isHidden, changeCount, onChang
       }`}
     >
       <div
-        className="scrollbar-hide flex w-full snap-x overflow-x-auto overscroll-x-contain [-webkit-overflow-scrolling:touch]"
+        className="scrollbar-hide flex w-full snap-x overflow-x-auto overscroll-x-contain [-webkit-overflow-scrolling:touch] [container-type:inline-size]"
         role="tablist"
         aria-label={t('git:tabs.ariaLabel')}
       >
@@ -39,7 +39,7 @@ export default function GitViewTabs({ activeView, isHidden, changeCount, onChang
             role="tab"
             aria-selected={activeView === id}
             onClick={() => onChange(id)}
-            className={`min-w-max flex-none snap-start px-4 py-2 text-sm font-medium transition-colors sm:min-w-0 sm:flex-1 ${
+            className={`min-w-max flex-none snap-start px-4 py-2 text-sm font-medium transition-colors [@container_(min-width:40rem)]:min-w-0 [@container_(min-width:40rem)]:flex-1 ${
               activeView === id
                 ? 'border-b-2 border-primary text-primary'
                 : 'text-muted-foreground hover:text-foreground'

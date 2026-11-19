@@ -42,6 +42,7 @@ vi.mock('@uiw/react-codemirror', () => {
 });
 
 type ToolbarPanelParams = {
+  showDiff: boolean;
   isSidebar: boolean;
   isExpanded: boolean;
   onPopOut: (() => void) | null;
@@ -204,4 +205,54 @@ test('an editor opened on mobile is floating from the start', async () => {
   assert.ok(isFloating(container));
   assert.equal(isDocked(), false);
   assert.equal(toolbarPanels.at(-1)?.isSidebar, false);
+});
+
+test('an embedded editor keeps its draft while another tool is open and only handles keys inside its visible pane', async () => {
+  const onClose = vi.fn();
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  const workspace = (visible: boolean) => (
+    <>
+      <textarea aria-label="Chat message" />
+      <EditorSidebar embedded visible={visible} editingFile={file} onCloseEditor={onClose} />
+    </>
+  );
+
+  const { rerender } = render(workspace(true));
+  const editor = await screen.findByTestId<HTMLTextAreaElement>('editor');
+  await waitFor(() => assert.equal(editor.value, 'hello'));
+  typeInto(editor, 'new draft');
+  const chat = screen.getByLabelText('Chat message');
+  fireEvent.keyDown(chat, { key: 'Escape' });
+  fireEvent.keyDown(chat, { key: 's', ctrlKey: true });
+
+  rerender(workspace(false));
+  assert.ok(editor.closest('[hidden]'));
+  fireEvent.keyDown(editor, { key: 'Escape' });
+  fireEvent.keyDown(editor, { key: 's', ctrlKey: true });
+  assert.equal(confirm.mock.calls.length, 0);
+  assert.equal(saveFile.mock.calls.length, 0);
+
+  rerender(workspace(true));
+  assert.equal(editor.closest('[hidden]') === null, true);
+  assert.equal(screen.getByTestId('editor') === editor, true);
+  assert.equal(editor.value, 'new draft');
+  assert.equal(readFile.mock.calls.length, 1);
+  fireEvent.keyDown(editor, { key: 'Escape' });
+  assert.equal(confirm.mock.calls.length, 1);
+  assert.equal(onClose.mock.calls.length, 0);
+  fireEvent.keyDown(editor, { key: 's', metaKey: true });
+  await waitFor(() => assert.equal(screen.queryByLabelText('Unsaved changes') === null, true));
+  assert.equal(saveFile.mock.calls.length, 1);
+});
+
+test('opening a Git diff after a regular file starts in diff view in the same tool panel', async () => {
+  const renderFile = (openedFile: CodeEditorFile) => (
+    <EditorSidebar embedded visible editingFile={openedFile} onCloseEditor={() => undefined} />
+  );
+  const { rerender } = render(renderFile(file));
+  await screen.findByTestId('editor');
+  assert.equal(toolbarPanels.at(-1)?.showDiff, false);
+  rerender(renderFile({ ...file, diffInfo: { old_string: 'old', new_string: 'new' } }));
+  await waitFor(() => assert.equal(screen.getByTestId<HTMLTextAreaElement>('editor').value, 'new'));
+  assert.equal(toolbarPanels.at(-1)?.showDiff, true);
 });

@@ -4,7 +4,8 @@ import { api } from '@/shared/api';
 
 /** Tracks whether the Browser Use workspace is enabled in server settings. */
 export function useBrowserUseEnabled() {
-  const [browserUseEnabled, setBrowserUseEnabled] = useState(false);
+  // An unknown setting keeps restored browser panels pending until the initial request resolves.
+  const [browserUseEnabled, setBrowserUseEnabled] = useState<boolean | null>(null);
 
   const loadBrowserUseSettings = useCallback(async () => {
     try {

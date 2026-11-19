@@ -54,7 +54,13 @@ export function useFileTreeData(projectId: string | undefined, projectRoot: stri
         pending.controller.abort();
       } else {
         await pending.done;
-        if (!active.current || pending.controller.signal.aborted) return;
+        if (!active.current) return;
+        // A background refresh can replace the page a directory reveal was
+        // waiting for. Continue the lookup against the replacement listing.
+        if (pending.controller.signal.aborted) {
+          if (childName && latest.current.has(key)) return loadDirectory(path, options);
+          return;
+        }
         if (!childName || childName === pending.childName) return latest.current.get(key);
         // Serialize a targeted lookup behind any other request for its parent.
         return loadDirectory(path, options);
@@ -108,6 +114,7 @@ export function useFileTreeData(projectId: string | undefined, projectRoot: stri
     await done;
     if (requests.current.get(key)?.controller === controller) requests.current.delete(key);
     if (!controller.signal.aborted) return latest.current.get(key);
+    if (childName && active.current && latest.current.has(key)) return loadDirectory(path, { childName });
   }, [keyFor, projectId, publish]);
 
   useEffect(() => {
@@ -142,11 +149,22 @@ export function useFileTreeData(projectId: string | undefined, projectRoot: stri
     if (latest.current.has(keyFor(path))) void load(path, { refresh: true });
   }, [invalidate, keyFor, load]);
 
-  const refreshTree = (expanded: Set<string>) => {
+  const refreshTree = (expanded: Set<string>, keepLocation?: { revealedPath: string | null }) => {
     const visible = new Set(['', ...Array.from(expanded, keyFor)]);
+    const locatedChildren = new Map<string, Set<string>>();
+    if (keepLocation) {
+      for (const path of [...expanded, ...(keepLocation.revealedPath ? [keepLocation.revealedPath] : [])]) {
+        const relative = keyFor(path);
+        const split = relative.lastIndexOf('/');
+        const parent = split < 0 ? '' : relative.slice(0, split);
+        const names = locatedChildren.get(parent) ?? new Set<string>();
+        names.add(relative.slice(split + 1));
+        locatedChildren.set(parent, names);
+      }
+    }
     const next = new Map(latest.current);
     for (const key of next.keys()) {
-      if (!visible.has(key)) {
+      if (!visible.has(key) && !(keepLocation && requests.current.has(key))) {
         requests.current.get(key)?.controller.abort();
         requests.current.delete(key);
         next.delete(key);
@@ -155,7 +173,16 @@ export function useFileTreeData(projectId: string | undefined, projectRoot: stri
     latest.current = next;
     setDirectories(next);
     // Explicit refresh also expires collapsed directories, which will reload on their next expansion.
-    for (const key of visible) refreshDirectory(key);
+    for (const key of visible) {
+      if (!latest.current.has(key)) continue;
+      const [firstChild, ...otherChildren] = locatedChildren.get(key) ?? [];
+      // Keep expanded/revealed children reachable even beyond the refreshed
+      // first page. A targeted match is served from the current filesystem.
+      void load(key, { refresh: true, childName: firstChild }).then(async (page) => {
+        if (!page) return;
+        for (const childName of otherChildren) await load(key, { childName });
+      });
+    }
   };
 
   const getDirectory = (path: string) => directories.get(keyFor(path)) ?? EMPTY_DIRECTORY;

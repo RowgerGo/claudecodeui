@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useRef } from 'react';
 
 import { api, readApiJson } from '@/shared/api';
-import type { Project, ProjectFileSearchResult } from '@/shared/types';
+import type { CodeEditorDiffInfo, Project, ProjectFileSearchResult } from '@/shared/types';
 
-// `diffInfo` is intentionally `any` so this resolver can wrap editor handlers
-// that expect a concrete diff payload type as well as generic callers.
-type OnFileOpen = (filePath: string, diffInfo?: any, line?: number | null) => void;
+type OnFileOpen = (filePath: string, diffInfo?: CodeEditorDiffInfo | null, line?: number | null) => void;
 
 const normalize = (value: string): string => value.replace(/\\/g, '/');
 
@@ -18,12 +16,13 @@ const isAbsoluteRef = (value: string): boolean => /^(\/|[A-Za-z]:\/)/.test(value
 export function useFileOpenResolver(
   selectedProject: Project | null | undefined,
   onFileOpen: OnFileOpen,
-): OnFileOpen {
+) {
   const projectId = selectedProject?.projectId;
   const pending = useRef<AbortController | null>(null);
-  useEffect(() => () => pending.current?.abort(), [projectId]);
+  const cancelLookup = useCallback(() => pending.current?.abort(), []);
+  useEffect(() => cancelLookup, [projectId, cancelLookup]);
 
-  return useCallback((filePath, diffInfo, line) => {
+  const resolveFile = useCallback<OnFileOpen>((filePath, diffInfo, line) => {
     pending.current?.abort();
     const ref = normalize(filePath).trim();
     if (!projectId || !ref || isAbsoluteRef(ref)) {
@@ -53,4 +52,6 @@ export function useFileOpenResolver(
       if (!controller.signal.aborted) onFileOpen(path, diffInfo, line);
     });
   }, [projectId, onFileOpen]);
+
+  return { resolveFile, cancelLookup };
 }

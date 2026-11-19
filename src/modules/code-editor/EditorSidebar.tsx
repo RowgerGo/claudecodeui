@@ -4,21 +4,28 @@ import type { MouseEvent, MutableRefObject } from 'react';
 import type { CodeEditorFile } from '@/shared/types';
 import CodeEditor from '@/modules/code-editor/CodeEditor';
 
-type EditorSidebarProps = {
+type EditorDocumentProps = {
   editingFile: CodeEditorFile | null;
+  onCloseEditor: () => void;
+  onUnsavedChangesChange?: (hasUnsavedChanges: boolean) => void;
+  projectPath?: string;
+};
+
+type ResizableEditorProps = EditorDocumentProps & {
+  embedded?: false;
   isMobile: boolean;
   editorExpanded: boolean;
   editorWidth: number;
   hasManualWidth: boolean;
   resizeHandleRef: MutableRefObject<HTMLDivElement | null>;
   onResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
-  onCloseEditor: () => void;
   onToggleEditorExpand: () => void;
-  // Forwarded to CodeEditor so useEditorSidebar can refuse to swap a dirty
-  // buffer for another file without asking.
-  onUnsavedChangesChange?: (hasUnsavedChanges: boolean) => void;
-  projectPath?: string;
   fillSpace?: boolean;
+};
+
+type EmbeddedEditorProps = EditorDocumentProps & {
+  embedded: true;
+  visible: boolean;
 };
 
 // Minimum width for the left content (file tree, chat, etc.)
@@ -26,8 +33,29 @@ const MIN_LEFT_CONTENT_WIDTH = 200;
 // Minimum width for the editor sidebar
 const MIN_EDITOR_WIDTH = 280;
 
-/** Used by the project-workspace module to dock the code editor beside the workspace content, with drag-to-resize and pop-out behaviour. */
-export default function EditorSidebar({
+/** Used by project-workspace to keep one file editor inside its tool panel or an independently resizable sidebar. */
+export default function EditorSidebar(props: ResizableEditorProps | EmbeddedEditorProps) {
+  const shortcutScope = useRef<HTMLDivElement>(null);
+
+  if (!props.embedded) return <ResizableEditorSidebar {...props} />;
+  if (!props.editingFile) return null;
+
+  return (
+    <div ref={shortcutScope} data-workspace-editor hidden={!props.visible} className="h-full min-h-0 w-full min-w-0 overflow-hidden">
+      <CodeEditor
+        key={JSON.stringify([props.editingFile.projectId, props.editingFile.path, Boolean(props.editingFile.diffInfo)])}
+        file={props.editingFile}
+        onClose={props.onCloseEditor}
+        onUnsavedChangesChange={props.onUnsavedChangesChange}
+        projectPath={props.projectPath}
+        isSidebar
+        shortcutScope={shortcutScope}
+      />
+    </div>
+  );
+}
+
+function ResizableEditorSidebar({
   editingFile,
   isMobile,
   editorExpanded,
@@ -40,7 +68,7 @@ export default function EditorSidebar({
   onUnsavedChangesChange,
   projectPath,
   fillSpace,
-}: EditorSidebarProps) {
+}: ResizableEditorProps) {
   const [poppedOut, setPoppedOut] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   // Only the ceiling is state; the applied width is derived below. Holding a

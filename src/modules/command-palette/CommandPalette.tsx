@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowDownToLine,
@@ -43,6 +42,7 @@ type Page = 'actions' | 'files' | 'sessions' | 'commits' | 'branches';
 type CommandPaletteProps = {
   selectedProject: Project | null;
   onStartNewChat: (project: Project) => void;
+  onOpenSession: (sessionId: string) => void;
   onOpenSettings: (tab?: string) => void;
   onShowTab?: (tab: AppTab) => void;
 };
@@ -59,6 +59,7 @@ const NAV_TABS: Array<{ id: AppTab; labelKey: string; keywords: string }> = [
 function CommandPalette({
   selectedProject,
   onStartNewChat,
+  onOpenSession,
   onOpenSettings,
   onShowTab,
 }: CommandPaletteProps) {
@@ -67,7 +68,6 @@ function CommandPalette({
   const [search, setSearch] = React.useState('');
   const [pages, setPages] = React.useState<Page[]>([]);
   const { toggleDarkMode } = useTheme();
-  const navigate = useNavigate();
   const ops = usePaletteOps();
 
   const page = pages.at(-1);
@@ -278,7 +278,7 @@ function CommandPalette({
                   <CommandItem
                     key={s.id}
                     value={`${s.label} ${s.snippet ?? ''} ${s.id}`.trim()}
-                    onSelect={() => run(() => navigate(`/session/${s.id}`))}
+                    onSelect={() => run(() => onOpenSession(s.id))}
                   >
                     <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
                     <div className="flex min-w-0 flex-1 flex-col">

@@ -17,6 +17,7 @@ type ProjectMainState = Pick<
   | 'selectedProject'
   | 'selectedSession'
   | 'activeTab'
+  | 'lastTool'
   | 'setActiveTab'
   | 'setSidebarOpen'
   | 'isLoadingProjects'
@@ -31,7 +32,7 @@ type ProjectMainState = Pick<
 
 type ProjectCommandState = Pick<
   ProjectsState,
-  'selectedProject' | 'handleNewSession' | 'openSettings' | 'setActiveTab'
+  'selectedProject' | 'handleNewSession' | 'openSessionChat' | 'openSettings' | 'setActiveTab'
 >;
 
 type ProjectEffectsState = Pick<
@@ -89,6 +90,7 @@ export function ProjectsStateProvider({
       selectedProject: state.selectedProject,
       selectedSession: state.selectedSession,
       activeTab: state.activeTab,
+      lastTool: state.lastTool,
       setActiveTab: state.setActiveTab,
       setSidebarOpen: state.setSidebarOpen,
       isLoadingProjects: state.isLoadingProjects,
@@ -102,6 +104,7 @@ export function ProjectsStateProvider({
     }),
     [
       state.activeTab,
+      state.lastTool,
       state.externalMessageUpdate,
       state.handleProjectSelect,
       state.isLoadingProjects,
@@ -121,10 +124,11 @@ export function ProjectsStateProvider({
     () => ({
       selectedProject: state.selectedProject,
       handleNewSession: state.handleNewSession,
+      openSessionChat: state.openSessionChat,
       openSettings: state.openSettings,
       setActiveTab: state.setActiveTab,
     }),
-    [state.handleNewSession, state.openSettings, state.selectedProject, state.setActiveTab],
+    [state.handleNewSession, state.openSessionChat, state.openSettings, state.selectedProject, state.setActiveTab],
   );
 
   const effectsState = useMemo<ProjectEffectsState>(

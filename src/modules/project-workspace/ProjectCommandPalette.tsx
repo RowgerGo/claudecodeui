@@ -8,6 +8,7 @@ function ProjectCommandPalette() {
   const {
     selectedProject,
     handleNewSession,
+    openSessionChat,
     openSettings,
     setActiveTab,
   } = useProjectCommandState();
@@ -16,6 +17,7 @@ function ProjectCommandPalette() {
     <CommandPalette
       selectedProject={selectedProject}
       onStartNewChat={handleNewSession}
+      onOpenSession={openSessionChat}
       onOpenSettings={openSettings}
       onShowTab={setActiveTab}
     />

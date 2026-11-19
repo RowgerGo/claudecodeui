@@ -2,6 +2,7 @@ import { EditorView } from '@codemirror/view';
 import { unifiedMergeView } from '@codemirror/merge';
 import type { Extension } from '@codemirror/state';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { usePaletteOps } from '@/modules/command-palette';
@@ -29,11 +30,12 @@ type CodeEditorProps = {
   projectPath?: string;
   isSidebar?: boolean;
   isExpanded?: boolean;
+  shortcutScope?: RefObject<HTMLElement>;
   onToggleExpand?: (() => void) | null;
   onPopOut?: (() => void) | null;
 };
 
-/** Rendered by the code-editor module's own EditorSidebar, and re-exported on the module barrel, as the full CodeMirror editor for one open file. */
+/** Used by EditorSidebar to edit, preview and save one open file in every workspace layout. */
 export default function CodeEditor({
   file,
   onClose,
@@ -41,6 +43,7 @@ export default function CodeEditor({
   projectPath,
   isSidebar = false,
   isExpanded = false,
+  shortcutScope,
   onToggleExpand = null,
   onPopOut = null,
 }: CodeEditorProps) {
@@ -225,7 +228,7 @@ export default function CodeEditor({
   useEditorKeyboardShortcuts({
     onSave: handleSave,
     onClose: requestClose,
-    dependency: content,
+    shortcutScope,
   });
 
   if (loading) {

@@ -1,24 +1,31 @@
 import { useEffect } from 'react';
+import type { RefObject } from 'react';
 
 import { ESCAPE_LAYER_SELECTOR } from '@/shared/constants';
 
 type UseEditorKeyboardShortcutsParams = {
   onSave: () => void;
   onClose: () => void;
-  dependency: string;
+  shortcutScope?: RefObject<HTMLElement>;
 };
 
 export const useEditorKeyboardShortcuts = ({
   onSave,
   onClose,
-  dependency,
+  shortcutScope,
 }: UseEditorKeyboardShortcutsParams) => {
   useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
+    // A docked workspace editor shares the page with the chat and terminal.
+    // Only keyboard events from its visible pane belong to its document.
+    const pane = shortcutScope?.current;
+    const target = shortcutScope ? pane : document;
+    if (!target) return;
+    const handleKeyDown = (event: Event) => {
+      if (!(event instanceof KeyboardEvent) || pane?.hidden || event.defaultPrevented) return;
       if (event.key === 'Escape') {
         // Leave Escapes another handler consumed or a layer above the editor
         // owns: open menus and modal dialogs close on Escape themselves.
-        if (event.defaultPrevented || document.querySelector(ESCAPE_LAYER_SELECTOR)) {
+        if (document.querySelector(ESCAPE_LAYER_SELECTOR)) {
           return;
         }
 
@@ -37,9 +44,9 @@ export const useEditorKeyboardShortcuts = ({
       }
     };
 
-    document.addEventListener('keydown', handleKeyDown);
+    target.addEventListener('keydown', handleKeyDown);
     return () => {
-      document.removeEventListener('keydown', handleKeyDown);
+      target.removeEventListener('keydown', handleKeyDown);
     };
-  }, [dependency, onClose, onSave]);
+  }, [shortcutScope, onClose, onSave]);
 };

@@ -8,13 +8,14 @@ import { ICON_SIZE_CLASS, getFileIconData } from '@/modules/file-tree/utils/file
 import { useExpandedDirectories } from '@/modules/file-tree/hooks/useExpandedDirectories';
 import { useFileTreeData } from '@/modules/file-tree/hooks/useFileTreeData';
 import { useFileTreeOperations } from '@/modules/file-tree/hooks/useFileTreeOperations';
+import { useVisibleToolRefresh } from '@/shared/hooks/useVisibleToolRefresh';
 import { useProjectFileSearch } from '@/shared/hooks/useProjectFileSearch';
 import { useFileTreeViewMode } from '@/modules/file-tree/hooks/useFileTreeViewMode';
 import { useFileTreeUpload } from '@/modules/file-tree/hooks/useFileTreeUpload';
 import type { DirectoryRevealRequest, FileTreeImageSelection, FileTreeNode, Project } from '@/shared/types';
 import { formatFileSize, formatRelativeTime, isImageFile } from '@/modules/file-tree/utils/fileTreeUtils';
 import { directoryRevealSegments } from '@/modules/file-tree/utils/revealDirectory';
-import { ScrollArea, Input } from '@/shared/ui';
+import { Dialog, DialogContent, ScrollArea, Input } from '@/shared/ui';
 import FileTreeBody from '@/modules/file-tree/FileTreeBody';
 import FileTreeDetailedColumns from '@/modules/file-tree/FileTreeDetailedColumns';
 import FileTreeHeader from '@/modules/file-tree/FileTreeHeader';
@@ -24,6 +25,8 @@ import ImageViewer from '@/modules/file-tree/ImageViewer';
 
 type FileTreeProps = {
   selectedProject: Project | null;
+  isVisible?: boolean;
+  refreshRevision?: number;
   onFileOpen?: (filePath: string) => void;
   // Directory to reveal (from an in-chat `path/` reference): its ancestors are
   // expanded so the folder is visible without hunting through the tree.
@@ -37,7 +40,7 @@ export default function FileTree(props: FileTreeProps) {
   return <ProjectFileTree key={JSON.stringify([project?.projectId, project?.path || project?.fullPath])} {...props} />;
 }
 
-function ProjectFileTree({ selectedProject, onFileOpen, revealDirectory }: FileTreeProps) {
+function ProjectFileTree({ selectedProject, onFileOpen, revealDirectory, isVisible = true, refreshRevision = 0 }: FileTreeProps) {
   const { t } = useTranslation();
   const [selectedImage, setSelectedImage] = useState<FileTreeImageSelection | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -126,6 +129,11 @@ function ProjectFileTree({ selectedProject, onFileOpen, revealDirectory }: FileT
     }
   };
 
+  useVisibleToolRefresh(isVisible, refreshRevision, () => {
+    if (showingResults) search.refresh();
+    else refreshTree(expandedDirs, { revealedPath });
+  });
+
   // File operations
   const operations = useFileTreeOperations({
     selectedProject,
@@ -198,7 +206,7 @@ function ProjectFileTree({ selectedProject, onFileOpen, revealDirectory }: FileT
       }
       if (item.type === 'directory') return;
 
-      if (isImageFile(item.name) && selectedProject) {
+      if (!onFileOpen && isImageFile(item.name) && selectedProject) {
         setSelectedImage({
           name: item.name,
           path: item.path,
@@ -338,6 +346,7 @@ function ProjectFileTree({ selectedProject, onFileOpen, revealDirectory }: FileT
 
         <div ref={rowsRef}>
           <FileTreeBody
+            isVisible={isVisible}
             items={items}
             loading={loading}
             error={error}
@@ -382,15 +391,17 @@ function ProjectFileTree({ selectedProject, onFileOpen, revealDirectory }: FileT
       )}
 
       {/* Delete Confirmation Dialog */}
-      {operations.deleteConfirmation.isOpen && operations.deleteConfirmation.item && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50">
-          <div className="mx-4 max-w-sm rounded-lg border border-border bg-background p-4 shadow-lg">
+      {operations.deleteConfirmation.item && (
+        <Dialog open={isVisible && operations.deleteConfirmation.isOpen}
+          onOpenChange={open => { if (!open && !operationLoading) operations.handleCancelDelete(); }}>
+          <DialogContent role="alertdialog" aria-labelledby="file-tree-delete-title"
+            wrapperClassName="z-[9999]" className="w-[calc(100%-2rem)] max-w-sm rounded-lg bg-background p-4">
             <div className="mb-4 flex items-center gap-3">
               <div className="rounded-full bg-red-100 p-2 dark:bg-red-900/30">
                 <AlertTriangle className="h-5 w-5 text-red-600 dark:text-red-400" />
               </div>
               <div>
-                <h3 className="font-medium text-foreground">
+                <h3 id="file-tree-delete-title" className="font-medium text-foreground">
                   {t('fileTree.delete.title', 'Delete {{type}}', {
                     type: operations.deleteConfirmation.item.type === 'directory' ? 'Folder' : 'File'
                   })}
@@ -422,8 +433,8 @@ function ProjectFileTree({ selectedProject, onFileOpen, revealDirectory }: FileT
                 {t('fileTree.delete.confirm', 'Delete')}
               </button>
             </div>
-          </div>
-        </div>
+          </DialogContent>
+        </Dialog>
       )}
 
       {/* Toast Notification */}

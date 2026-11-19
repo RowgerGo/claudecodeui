@@ -453,7 +453,7 @@ function ChatInterface({
   usePaletteOpsRegister({ insertComposerText });
 
   useEscapeToAbortSession({
-    canAbortSession,
+    canAbortSession: isActive && canAbortSession,
     onAbortSession: handleAbortSession,
     composerRef: textareaRef,
   });

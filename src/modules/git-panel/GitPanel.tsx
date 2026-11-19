@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useGitPanelController } from '@/modules/git-panel/hooks/useGitPanelController';
+import { useVisibleToolRefresh } from '@/shared/hooks/useVisibleToolRefresh';
 import { useRevertLocalCommit } from '@/modules/git-panel/hooks/useRevertLocalCommit';
 import type { ConfirmationRequest, FileOpenHandler, GitPanelView, Project } from '@/shared/types';
 import { getChangedFileCount } from '@/modules/git-panel/utils/gitPanelUtils';
@@ -18,6 +19,8 @@ import ConfirmActionModal from '@/modules/git-panel/modals/ConfirmActionModal';
 type GitPanelProps = {
   selectedProject: Project | null;
   isMobile?: boolean;
+  isVisible?: boolean;
+  refreshRevision?: number;
   onFileOpen?: FileOpenHandler;
   /** Switches the app to another project — used by the Worktrees view to jump into a worktree. */
   onProjectSelect?: (project: Project) => void;
@@ -29,6 +32,8 @@ type GitPanelProps = {
 export default function GitPanel({
   selectedProject,
   isMobile = false,
+  isVisible = true,
+  refreshRevision = 0,
   onFileOpen,
   onProjectSelect,
   onProjectsRefresh,
@@ -81,8 +86,11 @@ export default function GitPanel({
   } = useGitPanelController({
     selectedProject,
     activeView,
+    isVisible,
     onFileOpen,
   });
+
+  useVisibleToolRefresh(isVisible, refreshRevision, refreshAll);
 
   const { isRevertingLocalCommit, revertLatestLocalCommit } = useRevertLocalCommit({
     // `projectId` (DB primary key) is forwarded to the revert API which uses it
@@ -175,7 +183,7 @@ export default function GitPanel({
               projectPath={selectedProject.fullPath}
               gitStatus={gitStatus}
               gitDiff={gitDiff}
-              isLoading={isLoading}
+              isLoading={isLoading && !gitStatus}
               wrapText={wrapText}
               isCreatingInitialCommit={isCreatingInitialCommit}
               onWrapTextChange={setWrapText}
@@ -212,7 +220,7 @@ export default function GitPanel({
               // Treat an in-flight commits request as loading only while the
               // list is empty, so "No commits found" never flashes before the
               // first response and refetches don't blank an existing list.
-              isLoading={isLoading || (recentCommits.length === 0 && isLoadingCommits)}
+              isLoading={recentCommits.length === 0 && (isLoading || isLoadingCommits)}
               recentCommits={recentCommits}
               commitDiffs={commitDiffs}
               wrapText={wrapText}
@@ -250,7 +258,7 @@ export default function GitPanel({
       )}
 
       <ConfirmActionModal
-        action={confirmAction}
+        action={isVisible ? confirmAction : null}
         onCancel={() => setConfirmAction(null)}
         onConfirm={(useAlternateConfirmation) => {
           void executeConfirmedAction(useAlternateConfirmation);

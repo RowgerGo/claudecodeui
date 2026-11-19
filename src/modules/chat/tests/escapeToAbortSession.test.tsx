@@ -77,6 +77,14 @@ describe('Escape to stop the running turn', () => {
     expect(onAbortSession).not.toHaveBeenCalled();
   });
 
+  it('leaves Escape on workspace tool controls to the panel', () => {
+    const { onAbortSession } = renderEscapeToAbort();
+    const panel = appendElement('aside', { 'data-workspace-tools': '' });
+    const button = panel.appendChild(document.createElement('button'));
+    fireEvent.keyDown(button, { key: 'Escape' });
+    expect(onAbortSession).not.toHaveBeenCalled();
+  });
+
   it('still stops the turn from a focused control that takes no text', () => {
     const { onAbortSession } = renderEscapeToAbort();
     const checkbox = appendElement('input', { type: 'checkbox' });

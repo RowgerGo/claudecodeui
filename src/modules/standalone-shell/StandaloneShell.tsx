@@ -11,6 +11,7 @@ type StandaloneShellProps = {
   command?: string | null;
   isPlainShell?: boolean | null;
   isActive?: boolean;
+  autoFocus?: boolean;
   autoConnect?: boolean;
   onComplete?: ((exitCode: number) => void) | null;
   onClose?: (() => void) | null;
@@ -28,6 +29,7 @@ export default function StandaloneShell({
   command = null,
   isPlainShell = null,
   isActive = true,
+  autoFocus = true,
   autoConnect = true,
   onComplete = null,
   onClose = null,
@@ -69,6 +71,7 @@ export default function StandaloneShell({
           initialCommand={command}
           isPlainShell={shouldUsePlainShell}
           isActive={isActive}
+          autoFocus={autoFocus}
           onProcessComplete={handleProcessComplete}
           minimal={minimal}
           autoConnect={minimal ? true : autoConnect}

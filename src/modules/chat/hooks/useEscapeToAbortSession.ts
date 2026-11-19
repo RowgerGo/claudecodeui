@@ -36,6 +36,7 @@ function isTextEntryElement(element: HTMLElement): boolean {
  */
 function isEscapeOwnedElsewhere(event: KeyboardEvent, composer: HTMLTextAreaElement | null): boolean {
   const { target } = event;
+  if (target instanceof Element && target.closest('[data-workspace-tools]')) return true;
   if (target instanceof HTMLElement && target !== composer && isTextEntryElement(target)) {
     return true;
   }

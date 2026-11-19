@@ -1,65 +1,24 @@
 import { useTranslation } from 'react-i18next';
 
 import { LLMProviderLogo } from '@/shared/ui';
-import type { AppTab, Project, ProjectSession } from '@/shared/types';
-import { usePlugins } from '@/modules/plugins';
+import type { Project, ProjectSession } from '@/shared/types';
 import { getSessionTitle } from '@/shared/utils';
 import { useSessionTitleRename } from '@/modules/project-workspace/hooks/useSessionTitleRename';
 
 type WorkspaceTitleProps = {
-  activeTab: AppTab;
   selectedProject: Project;
   selectedSession: ProjectSession | null;
-  shouldShowTasksTab: boolean;
   /** Persists a new title for a session; resolves false when the backend refuses it. */
   onRenameSession: (sessionId: string, summary: string) => Promise<boolean>;
 };
 
-function getTabTitle(activeTab: AppTab, shouldShowTasksTab: boolean, t: (key: string) => string, pluginDisplayName?: string) {
-  if (activeTab.startsWith('plugin:') && pluginDisplayName) {
-    return pluginDisplayName;
-  }
-
-  if (activeTab === 'files') {
-    return t('mainContent.projectFiles');
-  }
-
-  if (activeTab === 'git') {
-    return t('tabs.git');
-  }
-
-  if (activeTab === 'tasks' && shouldShowTasksTab) {
-    return 'TaskMaster';
-  }
-
-  if (activeTab === 'browser') {
-    return t('tabs.browser');
-  }
-
-  return t('misc.projectFallback');
-}
-
-/**
- * Rendered by WorkspaceHeader to label the workspace with the active session or
- * tab name. On the chat tab the session title can be double-clicked to rename
- * the session in place, as a second way in beside the sidebar's rename.
- */
+/** Rendered by WorkspaceHeader to show and rename the session while using workspace tools. */
 export default function WorkspaceTitle({
-  activeTab,
   selectedProject,
   selectedSession,
-  shouldShowTasksTab,
   onRenameSession,
 }: WorkspaceTitleProps) {
   const { t } = useTranslation();
-  const { plugins } = usePlugins();
-
-  const pluginDisplayName = activeTab.startsWith('plugin:')
-    ? plugins.find((p) => p.name === activeTab.replace('plugin:', ''))?.displayName
-    : undefined;
-
-  const showSessionIcon = activeTab === 'chat' && Boolean(selectedSession);
-  const showChatNewSession = activeTab === 'chat' && !selectedSession;
   const sessionTitle = selectedSession ? getSessionTitle(selectedSession) : '';
 
   const {
@@ -79,14 +38,14 @@ export default function WorkspaceTitle({
 
   return (
     <div className="scrollbar-hide flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
-      {showSessionIcon && (
+      {selectedSession && (
         <div className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
-          <LLMProviderLogo provider={selectedSession?.__provider} className="h-4 w-4" />
+          <LLMProviderLogo provider={selectedSession.__provider} className="h-4 w-4" />
         </div>
       )}
 
       <div className="min-w-0 flex-1">
-        {activeTab === 'chat' && selectedSession ? (
+        {selectedSession ? (
           <div className="min-w-0">
             {isRenaming ? (
               <input
@@ -115,17 +74,10 @@ export default function WorkspaceTitle({
             )}
             <div className="truncate text-[11px] leading-tight text-muted-foreground">{selectedProject.displayName}</div>
           </div>
-        ) : showChatNewSession ? (
+        ) : (
           <div className="min-w-0">
             <h2 className="truncate text-base font-semibold leading-tight text-foreground">{t('mainContent.newSession')}</h2>
             <div className="truncate text-xs leading-tight text-muted-foreground">{selectedProject.displayName}</div>
-          </div>
-        ) : (
-          <div className="min-w-0">
-            <h2 className="truncate text-sm font-semibold leading-tight text-foreground">
-              {getTabTitle(activeTab, shouldShowTasksTab, t, pluginDisplayName)}
-            </h2>
-            <div className="truncate text-[11px] leading-tight text-muted-foreground">{selectedProject.displayName}</div>
           </div>
         )}
       </div>

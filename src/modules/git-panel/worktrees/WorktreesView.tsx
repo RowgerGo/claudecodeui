@@ -109,9 +109,9 @@ function WorktreeRow({ worktree, isMobile, isBusy, onOpen, onMerge, onRemove }: 
 
       {/* Actions */}
       <div className={`flex shrink-0 items-center gap-1 ${
-        worktree.isCurrent || isBusy
+        isMobile || worktree.isCurrent || isBusy
           ? 'opacity-100'
-          : 'opacity-100 sm:opacity-0 sm:focus-within:opacity-100 sm:group-hover:opacity-100'
+          : 'opacity-0 focus-within:opacity-100 group-hover:opacity-100'
       } transition-opacity`}>
         {isBusy ? (
           <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />

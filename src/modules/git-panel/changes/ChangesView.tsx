@@ -60,7 +60,7 @@ export default function ChangesView({
   const stageOpQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 
   const changedFiles = useMemo(() => getAllChangedFiles(gitStatus), [gitStatus]);
-  const hasExpandedFiles = expandedFiles.size > 0;
+  const hasExpandedFiles = changedFiles.some(file => expandedFiles.has(file));
 
   const enqueueStageOp = useCallback((operation: () => Promise<unknown>) => {
     setPendingStageOps((count) => count + 1);

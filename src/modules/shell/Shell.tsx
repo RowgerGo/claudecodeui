@@ -33,6 +33,7 @@ type ShellProps = {
   onProcessComplete?: ((exitCode: number) => void) | null;
   minimal?: boolean;
   autoConnect?: boolean;
+  autoFocus?: boolean;
   isActive?: boolean;
 };
 
@@ -45,6 +46,7 @@ export default function Shell({
   onProcessComplete = null,
   minimal = false,
   autoConnect = false,
+  autoFocus = true,
   isActive = true,
 }: ShellProps) {
   const { t } = useTranslation('chat');
@@ -78,6 +80,7 @@ export default function Shell({
     bypassPermissions,
     minimal,
     autoConnect,
+    isActive,
     isRestarting,
     onProcessComplete,
     onOutputRef,
@@ -166,7 +169,7 @@ export default function Shell({
   }, [isConnected]);
 
   useEffect(() => {
-    if (!isActive || !isInitialized || !isConnected) {
+    if (!autoFocus || !isActive || !isInitialized || !isConnected) {
       return;
     }
 
@@ -181,7 +184,7 @@ export default function Shell({
       window.cancelAnimationFrame(animationFrameId);
       window.clearTimeout(timeoutId);
     };
-  }, [isActive, isConnected, isInitialized, terminalRef]);
+  }, [autoFocus, isActive, isConnected, isInitialized, terminalRef]);
 
   const sendInput = useCallback(
     (data: string) => {

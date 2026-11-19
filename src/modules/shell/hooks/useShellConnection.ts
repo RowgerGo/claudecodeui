@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
-import type { FitAddon } from '@xterm/addon-fit';
 import type { Terminal } from '@xterm/xterm';
 
 import type { Project, ProjectSession } from '@/shared/types';
@@ -15,7 +14,6 @@ const PROCESS_EXIT_REGEX = /Process exited with code (\d+)/;
 type UseShellConnectionOptions = {
   wsRef: MutableRefObject<WebSocket | null>;
   terminalRef: MutableRefObject<Terminal | null>;
-  fitAddonRef: MutableRefObject<FitAddon | null>;
   selectedProjectRef: MutableRefObject<Project | null | undefined>;
   selectedSessionRef: MutableRefObject<ProjectSession | null | undefined>;
   initialCommandRef: MutableRefObject<string | null | undefined>;
@@ -42,7 +40,6 @@ type UseShellConnectionResult = {
 export function useShellConnection({
   wsRef,
   terminalRef,
-  fitAddonRef,
   selectedProjectRef,
   selectedSessionRef,
   initialCommandRef,
@@ -155,13 +152,13 @@ export function useShellConnection({
 
           window.setTimeout(() => {
             const currentTerminal = terminalRef.current;
-            const currentFitAddon = fitAddonRef.current;
             const currentProject = selectedProjectRef.current;
-            if (!currentTerminal || !currentFitAddon || !currentProject) {
+            if (!currentTerminal || !currentProject || wsRef.current !== socket) {
               return;
             }
 
-            currentFitAddon.fit();
+            // The terminal owns fitting. A panel hidden during this handshake
+            // keeps its last usable dimensions until it is shown again.
             const forceRestart = forceRestartOnInitRef.current;
             forceRestartOnInitRef.current = false;
 
@@ -213,7 +210,6 @@ export function useShellConnection({
     [
       bypassPermissionsRef,
       clearTerminalScreen,
-      fitAddonRef,
       handleSocketMessage,
       initialCommandRef,
       isConnected,

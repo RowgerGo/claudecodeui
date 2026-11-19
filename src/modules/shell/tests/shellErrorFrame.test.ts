@@ -1,6 +1,5 @@
 import { act, renderHook } from '@testing-library/react';
 import type { MutableRefObject } from 'react';
-import type { FitAddon } from '@xterm/addon-fit';
 import type { Terminal } from '@xterm/xterm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -50,7 +49,6 @@ function renderConnection() {
     useShellConnection({
       wsRef: ref<WebSocket | null>(null),
       terminalRef,
-      fitAddonRef: ref({ fit: vi.fn() } as unknown as FitAddon | null),
       selectedProjectRef: ref<Project | null | undefined>({
         fullPath: '/tmp/gone',
         path: '/tmp/gone',

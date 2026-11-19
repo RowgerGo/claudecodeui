@@ -17,6 +17,16 @@
     "upload": "Upload",
     "browse": "Browse"
   },
+  "toolPanel": {
+    "name": "Workspace tools",
+    "close": "Close tool panel",
+    "backToChat": "Back to chat",
+    "expand": "Maximize tool panel",
+    "restore": "Restore split view",
+    "resize": "Resize tool panel",
+    "backToFiles": "Back to files",
+    "backToGit": "Back to source control"
+  },
   "tabs": {
     "chat": "Chat",
     "shell": "Shell",

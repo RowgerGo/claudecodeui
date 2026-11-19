@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { act, render, renderHook } from '@testing-library/react';
 import React from 'react';
 import type { MutableRefObject } from 'react';
-import type { FitAddon } from '@xterm/addon-fit';
 import type { ITheme, Terminal } from '@xterm/xterm';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import { useShellConnection } from '@/modules/shell/hooks/useShellConnection';
 import { useShellRuntime } from '@/modules/shell/hooks/useShellRuntime';
 import { useShellTerminal } from '@/modules/shell/hooks/useShellTerminal';
+import { StandaloneShell } from '@/modules/standalone-shell';
 import { ThemeProvider, useTheme } from '@/shared/context/ThemeContext';
 import { TERMINAL_INIT_DELAY_MS } from '@/shared/constants';
 import type { Project, ProjectSession } from '@/shared/types';
@@ -32,7 +32,12 @@ type FakeTerminal = {
   disposed: boolean;
 };
 
-const { terminals } = vi.hoisted(() => ({ terminals: [] as FakeTerminal[] }));
+const { terminals, fit, focus, proposeDimensions } = vi.hoisted(() => ({
+  terminals: [] as FakeTerminal[],
+  fit: vi.fn(),
+  focus: vi.fn(),
+  proposeDimensions: vi.fn(() => ({ cols: 80, rows: 24 })),
+}));
 
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -48,6 +53,7 @@ vi.mock('@xterm/xterm', () => ({
 
     loadAddon() {}
     open() {}
+    focus = focus;
     attachCustomKeyEventHandler() {}
     onData() {
       return { dispose() {} };
@@ -68,12 +74,14 @@ vi.mock('@xterm/xterm', () => ({
 }));
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {
-    fit() {}
+    fit = fit;
+    proposeDimensions = proposeDimensions;
   },
 }));
 vi.mock('@xterm/addon-clipboard', () => ({ ClipboardAddon: class {} }));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
 vi.mock('@xterm/addon-webgl', () => ({ WebglAddon: class {} }));
+vi.mock('@/modules/chat', () => ({ getClaudeSettings: () => ({ skipPermissions: false }) }));
 vi.mock('@/modules/shell/utils/mobileTerminalSelection', () => ({
   installMobileTerminalSelection: () => ({ dispose() {} }),
 }));
@@ -139,13 +147,11 @@ function renderShellTerminal() {
       const theme = useTheme();
       const terminalContainerRef = React.useRef<HTMLDivElement>(container);
       const terminalRef = React.useRef<Terminal | null>(null);
-      const fitAddonRef = React.useRef<FitAddon | null>(null);
       const wsRef = React.useRef<WebSocket | null>(null);
 
       useShellTerminal({
         terminalContainerRef,
         terminalRef,
-        fitAddonRef,
         wsRef,
         selectedProject: project,
         minimal: false,
@@ -190,6 +196,59 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+test('the split terminal stays connected without taking focus or shrinking its PTY while hidden', () => {
+  vi.useFakeTimers();
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400);
+  let notifyResize = () => {};
+  vi.stubGlobal('ResizeObserver', class extends ResizeObserverStub {
+    constructor(notify: () => void) { super(); notifyResize = notify; }
+  });
+
+  const shell = (visible: boolean, autoFocus?: boolean) => React.createElement(StandaloneShell, {
+    project, isActive: visible, autoConnect: visible, autoFocus,
+  });
+  const view = render(shell(false, false), { wrapper });
+  assert.equal(FakeSocket.last, null);
+  view.rerender(shell(true, false));
+  const socket = FakeSocket.last as FakeSocket | null;
+  assert.ok(socket);
+
+  // The user moves back into chat before the asynchronous connection opens.
+  const composer = document.createElement('textarea');
+  document.body.appendChild(composer);
+  composer.focus();
+  act(() => { socket.onopen?.(); });
+  act(() => { vi.advanceTimersByTime(TERMINAL_INIT_DELAY_MS * 2); });
+  assert.ok(fit.mock.calls.length > 0);
+  assert.equal(focus.mock.calls.length, 0);
+  assert.ok(document.activeElement === composer);
+
+  const resizeCount = () => socket.sent.filter((frame) => JSON.parse(frame).type === 'resize').length;
+  const beforeHiding = resizeCount();
+  assert.ok(beforeHiding > 0);
+  view.rerender(shell(false, false));
+  act(() => { notifyResize(); vi.advanceTimersByTime(TERMINAL_INIT_DELAY_MS); });
+  assert.equal(resizeCount(), beforeHiding);
+  assert.equal(socket.readyState, FakeSocket.OPEN);
+
+  // A nearly collapsed visible pane can also yield xterm's minimum dimensions.
+  proposeDimensions.mockReturnValue({ cols: 2, rows: 1 });
+  view.rerender(shell(true, false));
+  act(() => { vi.advanceTimersByTime(TERMINAL_INIT_DELAY_MS); });
+  assert.equal(resizeCount(), beforeHiding);
+  proposeDimensions.mockReturnValue({ cols: 80, rows: 24 });
+  act(() => { notifyResize(); vi.advanceTimersByTime(TERMINAL_INIT_DELAY_MS); });
+  assert.ok(resizeCount() > beforeHiding);
+  assert.equal(terminals.length, 1);
+  assert.ok(FakeSocket.last === socket);
+
+  // Existing full-page and setup callers still focus their terminal by default.
+  view.rerender(shell(true));
+  act(() => { vi.advanceTimersByTime(TERMINAL_INIT_DELAY_MS); });
+  assert.ok(focus.mock.calls.length > 0);
 });
 
 test('a terminal opened in light mode is painted with the light palette', () => {
@@ -268,7 +327,6 @@ test('the shell init message tells the server which colour scheme the terminal i
     useShellConnection({
       wsRef: ref<WebSocket | null>(null),
       terminalRef: ref({ write: vi.fn(), cols: 80, rows: 24 } as unknown as Terminal | null),
-      fitAddonRef: ref({ fit: vi.fn() } as unknown as FitAddon | null),
       selectedProjectRef: ref<Project | null | undefined>(project),
       selectedSessionRef: ref<ProjectSession | null | undefined>(null),
       initialCommandRef: ref<string | null | undefined>(null),

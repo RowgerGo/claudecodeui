@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 
 import { cn } from '@/shared/utils';
-import { Badge, Button, Input } from '@/shared/ui';
+import { Badge, Button, Dialog, DialogContent, Input } from '@/shared/ui';
 import { api, readApiJson, ApiRequestError } from '@/shared/api';
 import type { SettingsMainTab } from '@/shared/types';
 
@@ -362,8 +362,8 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
   };
 
   const renderEmptyState = () => (
-    <div className="flex min-h-0 flex-1 items-center justify-center p-6">
-      <div className="w-full max-w-2xl rounded-md border border-border bg-card/40 p-5 shadow-sm">
+    <div className="flex min-h-0 flex-1 overflow-y-auto p-4">
+      <div className="m-auto w-full max-w-2xl rounded-md border border-border bg-card/40 p-4 shadow-sm">
         <div className="flex items-start gap-3">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-border bg-background">
             <MonitorPlay className="h-5 w-5 text-primary" />
@@ -401,7 +401,7 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
           </div>
         )}
 
-        <div className="mt-5 grid gap-2 sm:grid-cols-2">
+        <div className="mt-5 grid gap-2 [@container_(min-width:40rem)]:grid-cols-2">
           {PROMPT_KEYS.map((promptKey) => (
             <div key={promptKey} className="rounded-md border border-border/70 bg-background/70 p-3">
               <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -417,9 +417,10 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
   );
 
   const renderBrowserScreen = (fullscreen = false) => (
-    <div className={cn('flex flex-1 items-center justify-center bg-neutral-950', fullscreen ? 'min-h-[80vh]' : 'min-h-[420px]')}>
+    <div className={cn('flex flex-1 items-center justify-center bg-neutral-950', fullscreen ? 'min-h-[80vh]' : 'min-h-48 [@container_(min-width:48rem)]:min-h-[420px]')}>
       {selectedSession?.screenshotDataUrl ? (
         <div
+          data-browser-surface=""
           className={cn(
             'relative inline-block max-h-full',
             selectedSession.status === 'ready' && 'rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-primary',
@@ -496,7 +497,7 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background">
+    <div className="flex h-full min-h-0 min-w-0 flex-col bg-background [container-type:inline-size]">
       <div className="flex items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -542,7 +543,7 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
       )}
 
       {sessions.length > 0 && (
-        <div className="border-b border-border/60 bg-muted/20 px-3 py-2 lg:hidden">
+        <div className="border-b border-border/60 bg-muted/20 px-3 py-2 [@container_(min-width:56rem)]:hidden">
           <div className="flex gap-2 overflow-x-auto">
             {sessions.map((session) => (
               <button
@@ -566,8 +567,8 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
         </div>
       )}
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <main className="flex min-h-0 flex-col overflow-hidden">
+      <div className="grid min-h-0 flex-1 grid-cols-1 [@container_(min-width:56rem)]:grid-cols-[minmax(0,1fr)_320px]">
+        <main className="flex min-h-0 min-w-0 flex-col overflow-hidden">
           <div className="flex items-center justify-between gap-3 border-b border-border/60 bg-muted/20 px-4 py-2.5 text-xs text-muted-foreground">
             <div className="min-w-0 truncate">
               {t('browserUse.activeCount', { n: activeSessions.length })}
@@ -583,7 +584,7 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
             renderEmptyState()
           ) : (
             <div className="min-h-0 flex-1 overflow-auto bg-muted/20 p-4">
-              <div className="mx-auto flex min-h-[500px] max-w-7xl flex-col overflow-hidden rounded-md border border-border bg-background shadow-sm">
+              <div className="mx-auto flex max-w-7xl flex-col overflow-hidden rounded-md border border-border bg-background shadow-sm [@container_(min-width:48rem)]:min-h-[500px]">
                 <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-2">
                   <Badge variant="outline" className={selectedSession ? cn('text-[10px]', getStatusTone(selectedSession.status)) : 'text-[10px]'}>
                     {getStatusLabel(selectedSession?.status, t)}
@@ -597,16 +598,16 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
                       <span className="truncate">{selectedSession?.url || t('browserUse.noPageLoaded')}</span>
                     </div>
                   </div>
-                  <div className="hidden text-xs text-muted-foreground md:block">
+                  <div className="hidden text-xs text-muted-foreground [@container_(min-width:48rem)]:block">
                     {formatAction(selectedSession?.lastAction || null, t)}
                   </div>
                   <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setIsFullscreen(true)} disabled={!selectedSession?.screenshotDataUrl} title={t('browserUse.fullScreen')} aria-label={t('browserUse.fullScreen')}>
                     <Expand className="h-4 w-4" />
                   </Button>
-                  <Button variant="ghost" size="sm" className="h-8 w-8 p-0 lg:hidden" onClick={stopSession} disabled={isBusy || !selectedSession || selectedSession.status !== 'ready'} title={t('browserUse.stopSession')} aria-label={t('browserUse.stopSession')}>
+                  <Button variant="ghost" size="sm" className="h-8 w-8 p-0 [@container_(min-width:56rem)]:hidden" onClick={stopSession} disabled={isBusy || !selectedSession || selectedSession.status !== 'ready'} title={t('browserUse.stopSession')} aria-label={t('browserUse.stopSession')}>
                     <Square className="h-4 w-4" />
                   </Button>
-                  <Button variant="ghost" size="sm" className="h-8 w-8 p-0 lg:hidden" onClick={deleteSession} disabled={isBusy || !selectedSession} title={t('browserUse.deleteSession')} aria-label={t('browserUse.deleteSession')}>
+                  <Button variant="ghost" size="sm" className="h-8 w-8 p-0 [@container_(min-width:56rem)]:hidden" onClick={deleteSession} disabled={isBusy || !selectedSession} title={t('browserUse.deleteSession')} aria-label={t('browserUse.deleteSession')}>
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>
@@ -616,7 +617,7 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
           )}
         </main>
 
-        <aside className="hidden min-h-0 flex-col border-l border-border/60 bg-background lg:flex">
+        <aside className="hidden min-h-0 flex-col border-l border-border/60 bg-background [@container_(min-width:56rem)]:flex">
           <div className="border-b border-border/60 px-4 py-3">
             <div className="flex items-center justify-between gap-2">
               <div>
@@ -672,11 +673,11 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
         </aside>
       </div>
 
-      {isFullscreen && selectedSession && (
-        <div className="fixed inset-0 z-50 bg-black/90 p-6">
-          <div className="flex h-full flex-col rounded-md border border-white/10 bg-black">
+      <Dialog open={Boolean(isVisible && isFullscreen && selectedSession)} onOpenChange={setIsFullscreen}>
+        <DialogContent aria-label={t('browserUse.fullScreen')} className="flex h-dvh max-w-none flex-col overflow-auto rounded-none bg-black p-2 sm:p-6">
+          <div className="flex min-h-full flex-col rounded-md border border-white/10 bg-black">
             <div className="flex items-center justify-between border-b border-white/10 px-4 py-3 text-sm text-white/80">
-              <div className="min-w-0 truncate">{selectedSession.title || selectedSession.url || t('browserUse.sessionFallback')}</div>
+              <div className="min-w-0 truncate">{selectedSession?.title || selectedSession?.url || t('browserUse.sessionFallback')}</div>
               <Button variant="outline" size="sm" onClick={() => setIsFullscreen(false)}>
                 <X className="h-4 w-4" />
                 {t('browserUse.close')}
@@ -684,8 +685,8 @@ export default function BrowserUsePanel({ isVisible, onShowSettings }: BrowserUs
             </div>
             {renderBrowserSurface(true)}
           </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

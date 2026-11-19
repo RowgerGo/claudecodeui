@@ -8,6 +8,7 @@ import { Input } from '@/shared/ui';
 import FileContextMenu from '@/modules/file-tree/FileContextMenu';
 
 type FileTreeNodeProps = {
+  isVisible: boolean;
   item: FileTreeNodeType;
   level: number;
   viewMode: FileTreeViewMode;
@@ -241,6 +242,7 @@ export default function FileTreeNode(props: FileTreeNodeProps) {
     <div className="select-none">
       {hasContextMenu ? (
         <FileContextMenu
+          isVisible={props.isVisible}
           item={item}
           onRename={onRename}
           onDelete={onDelete}

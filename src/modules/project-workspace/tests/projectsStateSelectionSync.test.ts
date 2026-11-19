@@ -283,3 +283,45 @@ test('a superseded first load never renders the sidebar as empty', async () => {
     `the sidebar must never see a settled empty list while the load is still in flight: ${JSON.stringify(renderedStates)}`,
   );
 });
+
+test('a saved tool tab opens beside the chat and reopening the workspace remembers the last closed tool', async () => {
+  respondWith([]);
+  localStorage.setItem('activeTab', 'git');
+  const first = await renderProjectsState();
+  await waitFor(() => assert.equal(first.result.current.isLoadingProjects, false));
+  assert.equal(first.result.current.activeTab, 'git');
+  act(() => first.result.current.setActiveTab('chat'));
+  assert.equal(first.result.current.lastTool, 'git');
+  first.unmount();
+
+  const second = await renderProjectsState();
+  await waitFor(() => assert.equal(second.result.current.isLoadingProjects, false));
+  assert.equal(second.result.current.activeTab, 'chat');
+  assert.equal(second.result.current.lastTool, 'git');
+});
+
+test('selecting or starting a chat keeps a split tool open and returns from an exclusive tool', async () => {
+  respondWith([]);
+  const { result } = await renderProjectsState();
+  await waitFor(() => assert.equal(result.current.isLoadingProjects, false));
+  const project = buildProject();
+  act(() => result.current.setActiveTab('browser'));
+  act(() => result.current.handleSessionSelect({ id: 'one' }));
+  act(() => result.current.handleNewSession(project));
+  assert.equal(result.current.activeTab, 'browser');
+
+  const panel = document.createElement('aside');
+  panel.id = 'workspace-tools';
+  panel.dataset.exclusive = 'true';
+  document.body.appendChild(panel);
+  try {
+    act(() => result.current.handleSessionSelect({ id: 'two' }));
+    assert.equal(result.current.activeTab, 'chat');
+    act(() => result.current.setActiveTab('shell'));
+    act(() => result.current.handleNewSession(project));
+    assert.equal(result.current.activeTab, 'chat');
+    assert.equal(result.current.lastTool, 'shell');
+  } finally {
+    panel.remove();
+  }
+});

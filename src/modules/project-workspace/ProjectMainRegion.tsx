@@ -15,6 +15,7 @@ function ProjectMainRegion({
     selectedProject,
     selectedSession,
     activeTab,
+    lastTool,
     setActiveTab,
     setSidebarOpen,
     isLoadingProjects,
@@ -54,6 +55,7 @@ function ProjectMainRegion({
       selectedProject={selectedProject}
       selectedSession={selectedSession}
       activeTab={activeTab}
+      lastTool={lastTool}
       setActiveTab={setActiveTab}
       ws={ws}
       sendMessage={sendMessage}

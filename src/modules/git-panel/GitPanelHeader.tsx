@@ -141,14 +141,25 @@ export default function GitPanelHeader({
       {/* Branch row + action buttons */}
       <div className={`flex items-center justify-between border-b border-border/60 ${isMobile ? 'px-3 py-2' : 'px-4 py-3'}`}>
         {/* Branch selector */}
-        <div className="relative" ref={dropdownRef}>
+        <div
+          className="relative min-w-0"
+          ref={dropdownRef}
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape' || !showBranchDropdown) return;
+            event.preventDefault();
+            event.stopPropagation();
+            setShowBranchDropdown(false);
+            dropdownRef.current?.querySelector('button')?.focus();
+          }}
+        >
           <button
+            aria-expanded={showBranchDropdown}
             onClick={() => setShowBranchDropdown((prev) => !prev)}
-            className={`flex items-center rounded-lg transition-colors hover:bg-accent ${isMobile ? 'space-x-1 px-2 py-1' : 'space-x-2 px-3 py-1.5'}`}
+            className={`flex max-w-full items-center rounded-lg transition-colors hover:bg-accent ${isMobile ? 'space-x-1 px-2 py-1' : 'space-x-2 px-3 py-1.5'}`}
           >
             <GitBranch className={`text-muted-foreground ${isMobile ? 'h-3 w-3' : 'h-4 w-4'}`} />
-            <span className="flex items-center gap-1">
-              <span className={`font-medium ${isMobile ? 'text-xs' : 'text-sm'}`}>{currentBranch}</span>
+            <span className="flex min-w-0 items-center gap-1">
+              <span title={currentBranch} className={`truncate font-medium ${isMobile ? 'text-xs' : 'text-sm'}`}>{currentBranch}</span>
               {remoteStatus?.hasRemote && (
                 <span className="flex items-center gap-0.5 text-xs">
                   {aheadCount > 0 && (
@@ -229,7 +240,7 @@ export default function GitPanelHeader({
         </div>
 
         {/* Action buttons */}
-        <div className={`flex items-center ${isMobile ? 'gap-1' : 'gap-2'}`}>
+        <div className={`flex shrink-0 items-center ${isMobile ? 'gap-1' : 'gap-2'}`}>
           {remoteStatus?.hasRemote && (
             <>
               {!remoteStatus.hasUpstream ? (

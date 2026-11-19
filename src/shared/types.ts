@@ -68,8 +68,11 @@ export type ProviderModelActions = {
 
 //----------------- PROJECTS AND SESSIONS ------------
 
-/** Identifies the workspace pane the user is looking at; plugin panes are namespaced by plugin id. */
+/** Workspace navigation target used by the command palette and persisted tab preference. */
 export type AppTab = 'chat' | 'files' | 'shell' | 'git' | 'tasks' | 'browser' | `plugin:${string}`;
+
+/** A tool shown beside the conversation, including dynamically registered plugins. */
+export type WorkspaceTool = Exclude<AppTab, 'chat'>;
 
 /** A message queued to be sent to a session at a future time. */
 export type ScheduledMessage = {

@@ -133,3 +133,70 @@ test('switching projects cancels old directory requests before their late respon
   assert.equal(Boolean(screen.queryByText(folder.name)), false);
   assert.ok(screen.getByText(otherFile.name));
 });
+
+test('turn refresh during a directory lookup preserves the off-page target and expanded folder', async () => {
+  let finishLookup!: (result: Response) => void;
+  let started = false;
+  vi.mocked(api.listFileDirectory).mockImplementation(async (_id, path, _cursor, _options, child) => {
+    if (path) return Response.json({ entries: [file], nextCursor: null });
+    if (child === folder.name && !started) {
+      started = true;
+      return new Promise(resolve => { finishLookup = resolve; });
+    }
+    return Response.json({ entries: [], nextCursor: 'more', matchedEntry: child === folder.name ? folder : null });
+  });
+  const revealDirectory = { path: 'decisions/' };
+  const tree = (revision: number) => <FileTree selectedProject={project} revealDirectory={revealDirectory} refreshRevision={revision} />;
+  const { rerender } = render(tree(0));
+  await waitFor(() => assert.ok(started));
+  rerender(tree(1));
+  await act(async () => finishLookup(Response.json({ entries: [], nextCursor: 'old' })));
+  await screen.findByText(file.name);
+  rerender(tree(2));
+  await waitFor(() => assert.ok(vi.mocked(api.listFileDirectory).mock.calls.some(call => call[1] === 'decisions')));
+  assert.ok(screen.getByText(file.name));
+});
+
+test('hidden context menus and delete dialogs release Escape for the chat', async () => {
+  const tree = (isVisible: boolean) => <FileTree selectedProject={project} isVisible={isVisible} />;
+  const { rerender } = render(tree(true));
+  const row = await screen.findByText(folder.name);
+  fireEvent.contextMenu(row);
+  assert.ok(screen.getByRole('menu'));
+  rerender(tree(false));
+  assert.equal(document.querySelector('[role="menu"]') === null, true);
+  rerender(tree(true));
+  fireEvent.contextMenu(row);
+  fireEvent.click(screen.getByText('fileTree.context.delete'));
+  assert.ok(screen.getByRole('alertdialog'));
+  fireEvent.keyDown(document, { key: 'Escape' });
+  assert.equal(screen.queryByRole('alertdialog') === null, true);
+  fireEvent.contextMenu(row);
+  fireEvent.click(screen.getByText('fileTree.context.delete'));
+  rerender(tree(false));
+  assert.equal(document.querySelector('[aria-modal="true"]') === null, true);
+  assert.equal(vi.mocked(api.deleteFile).mock.calls.length, 0);
+});
+
+test('a turn refresh of a search cannot overwrite the next search term', async () => {
+  let finishRefresh!: (result: Response) => void;
+  const match = (name: string) => Response.json({
+    entries: [{ ...file, name, relativePath: name }], truncated: false,
+  });
+  vi.mocked(api.searchProjectFiles)
+    .mockResolvedValueOnce(match('first.md'))
+    .mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve; }))
+    .mockResolvedValueOnce(match('second.md'));
+  const tree = (revision: number) => <FileTree selectedProject={project} refreshRevision={revision} />;
+  const { rerender } = render(tree(0));
+  const query = screen.getByRole('textbox');
+  fireEvent.change(query, { target: { value: 'first' } });
+  await screen.findByText('first.md');
+  rerender(tree(1));
+  await waitFor(() => assert.equal(vi.mocked(api.searchProjectFiles).mock.calls.length, 2));
+  fireEvent.change(query, { target: { value: 'second' } });
+  await screen.findByText('second.md');
+  await act(async () => finishRefresh(match('outdated.md')));
+  assert.ok(screen.getByText('second.md'));
+  assert.equal(screen.queryByText('outdated.md') === null, true);
+});

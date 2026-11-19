@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { SetStateAction } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
 import { api } from '@/shared/api';
-import type { ServerEvent,
+import type {
   AppTab,
+  IsSessionProcessing,
   LLMProvider,
   LoadingProgress,
   Project,
-  ProjectSession,IsSessionProcessing } from '@/shared/types';
+  ProjectSession,
+  ServerEvent,
+  WorkspaceTool,
+} from '@/shared/types';
 import { mergeProjectSelectionMetadata } from '@/modules/project-workspace/utils/projectSelectionMetadata';
 import { readSelectedProvider } from '@/shared/selectedProvider';
 
@@ -383,17 +388,27 @@ const isValidTab = (tab: string): tab is AppTab => {
   return VALID_TABS.has(tab) || tab.startsWith('plugin:');
 };
 
-const readPersistedTab = (): AppTab => {
+type WorkspaceToolsState = {
+  open: boolean;
+  lastTool: WorkspaceTool;
+};
+
+function readWorkspaceTools(): WorkspaceToolsState {
   try {
-    const stored = localStorage.getItem('activeTab');
-    if (stored && isValidTab(stored)) {
-      return stored as AppTab;
+    // Existing installations already remember the selected workspace tab here.
+    const tab = localStorage.getItem('activeTab');
+    if (tab && isValidTab(tab) && tab !== 'chat') {
+      return { open: true, lastTool: tab };
+    }
+    const tool = localStorage.getItem('workspace.lastTool');
+    if (tool && isValidTab(tool) && tool !== 'chat') {
+      return { open: false, lastTool: tool };
     }
   } catch {
     // localStorage unavailable
   }
-  return 'chat';
-};
+  return { open: false, lastTool: 'files' };
+}
 
 export function useProjectsState({
   sessionId,
@@ -406,15 +421,34 @@ export function useProjectsState({
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [selectedSession, setSelectedSession] = useState<ProjectSession | null>(null);
   const [attentionSessionIds, setAttentionSessionIds] = useState<Set<string>>(new Set());
-  const [activeTab, setActiveTab] = useState<AppTab>(readPersistedTab);
+  // A closed panel remembers the tool to reopen even across a page reload.
+  const [workspaceTools, setWorkspaceTools] = useState(readWorkspaceTools);
+  const activeTab: AppTab = workspaceTools.open ? workspaceTools.lastTool : 'chat';
+  const setActiveTab = useCallback((update: SetStateAction<AppTab>) => {
+    setWorkspaceTools((previous) => {
+      const current = previous.open ? previous.lastTool : 'chat';
+      const next = typeof update === 'function' ? update(current) : update;
+      if (current === next) return previous;
+      if (next === 'chat') return { ...previous, open: false };
+      return { open: true, lastTool: next };
+    });
+  }, []);
+
+  const revealSelectedChat = useCallback(() => {
+    // The same session action can originate from a wide split or a full-width tool.
+    if (isMobile || document.querySelector('#workspace-tools[data-exclusive="true"]')) {
+      setActiveTab('chat');
+    }
+  }, [isMobile, setActiveTab]);
 
   useEffect(() => {
     try {
       localStorage.setItem('activeTab', activeTab);
+      localStorage.setItem('workspace.lastTool', workspaceTools.lastTool);
     } catch {
       // Silently ignore storage errors
     }
-  }, [activeTab]);
+  }, [activeTab, workspaceTools.lastTool]);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isLoadingProjects, setIsLoadingProjects] = useState(true);
@@ -1050,14 +1084,15 @@ export function useProjectsState({
     [isMobile, navigate],
   );
 
+  const openSessionChat = useCallback((id: string) => {
+    revealSelectedChat();
+    navigate(`/session/${id}`);
+  }, [navigate, revealSelectedChat]);
+
   const handleSessionSelect = useCallback(
     (session: ProjectSession) => {
       clearSessionAttention(session.id);
       setSelectedSession(session);
-
-      if (activeTab === 'tasks' || activeTab === 'browser') {
-        setActiveTab('chat');
-      }
 
       if (isMobile) {
         // Sessions are tagged with the owning project's DB `projectId` when
@@ -1072,16 +1107,16 @@ export function useProjectsState({
         }
       }
 
-      navigate(`/session/${session.id}`);
+      openSessionChat(session.id);
     },
-    [activeTab, clearSessionAttention, isMobile, navigate, selectedProject?.projectId],
+    [clearSessionAttention, isMobile, openSessionChat, selectedProject?.projectId],
   );
 
   const handleNewSession = useCallback(
     (project: Project) => {
       setSelectedProject(project);
       setSelectedSession(null);
-      setActiveTab('chat');
+      revealSelectedChat();
       setNewSessionTrigger((previous) => previous + 1);
       navigate('/');
 
@@ -1089,7 +1124,7 @@ export function useProjectsState({
         setSidebarOpen(false);
       }
     },
-    [isMobile, navigate],
+    [isMobile, navigate, revealSelectedChat],
   );
 
   const handleSessionDelete = useCallback(
@@ -1312,6 +1347,8 @@ export function useProjectsState({
     selectedProject,
     selectedSession,
     activeTab,
+    lastTool: workspaceTools.lastTool,
+    openSessionChat,
     sidebarOpen,
     isLoadingProjects,
     loadingProgress,

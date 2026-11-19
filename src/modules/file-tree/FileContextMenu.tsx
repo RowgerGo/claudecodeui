@@ -48,6 +48,7 @@ function calculateViewportSafePosition(clientX: number, clientY: number) {
 export default function FileContextMenu({
   children,
   item,
+  isVisible,
   onRename,
   onDelete,
   onNewFile,
@@ -61,6 +62,7 @@ export default function FileContextMenu({
 }: {
   children: ReactNode;
   item?: FileContextItem | null;
+  isVisible: boolean;
   onRename?: (item: FileContextItem) => void;
   onDelete?: (item: FileContextItem) => void;
   onNewFile?: (path: string) => void;
@@ -76,6 +78,10 @@ export default function FileContextMenu({
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // A menu belongs to the currently visible tree; reopening the tool starts
+  // with its previous rows and without a stale menu anchored to another pane.
+  if (!isVisible && isMenuOpen) setIsMenuOpen(false);
 
   const closeContextMenu = useCallback(() => {
     setIsMenuOpen(false);
@@ -276,7 +282,7 @@ export default function FileContextMenu({
         {children}
       </div>
 
-      {isMenuOpen && (
+      {isMenuOpen && isVisible && (
         <div
           ref={menuRef}
           role="menu"

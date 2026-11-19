@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { MutableRefObject, RefObject } from 'react';
-import type { FitAddon } from '@xterm/addon-fit';
 import type { Terminal } from '@xterm/xterm';
 
 import { useTheme } from '@/shared/context/ThemeContext';
@@ -16,6 +15,7 @@ type UseShellRuntimeOptions = {
   bypassPermissions: boolean;
   minimal: boolean;
   autoConnect: boolean;
+  isActive?: boolean;
   isRestarting: boolean;
   onProcessComplete?: ((exitCode: number) => void) | null;
   onOutputRef?: MutableRefObject<(() => void) | null>;
@@ -43,6 +43,7 @@ export function useShellRuntime({
   bypassPermissions,
   minimal,
   autoConnect,
+  isActive = true,
   isRestarting,
   onProcessComplete,
   onOutputRef,
@@ -50,7 +51,6 @@ export function useShellRuntime({
   const { isDarkMode } = useTheme();
   const terminalContainerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const selectedProjectRef = useRef(selectedProject);
@@ -92,10 +92,10 @@ export function useShellRuntime({
   const { isInitialized, clearTerminalScreen, disposeTerminal } = useShellTerminal({
     terminalContainerRef,
     terminalRef,
-    fitAddonRef,
     wsRef,
     selectedProject,
     minimal,
+    isActive,
     isRestarting,
     closeSocket,
   });
@@ -109,7 +109,6 @@ export function useShellRuntime({
   } = useShellConnection({
     wsRef,
     terminalRef,
-    fitAddonRef,
     selectedProjectRef,
     selectedSessionRef,
     initialCommandRef,

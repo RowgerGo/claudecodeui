@@ -160,10 +160,10 @@ const ClipboardAddonCtor = ClipboardAddon as unknown as new (
 type UseShellTerminalOptions = {
   terminalContainerRef: RefObject<HTMLDivElement>;
   terminalRef: MutableRefObject<Terminal | null>;
-  fitAddonRef: MutableRefObject<FitAddon | null>;
   wsRef: MutableRefObject<WebSocket | null>;
   selectedProject: Project | null | undefined;
   minimal: boolean;
+  isActive?: boolean;
   isRestarting: boolean;
   closeSocket: () => void;
 };
@@ -177,10 +177,10 @@ type UseShellTerminalResult = {
 export function useShellTerminal({
   terminalContainerRef,
   terminalRef,
-  fitAddonRef,
   wsRef,
   selectedProject,
   minimal,
+  isActive = true,
   isRestarting,
   closeSocket,
 }: UseShellTerminalOptions): UseShellTerminalResult {
@@ -190,10 +190,33 @@ export function useShellTerminal({
   // effect's dependencies, a toggle would dispose the terminal and close the
   // socket instead of repainting the session that is running.
   const isDarkModeRef = useRef(isDarkMode);
+  const activeRef = useRef(isActive);
+  const fitAddonRef = useRef<FitAddon | null>(null);
   const resizeTimeoutRef = useRef<number | null>(null);
   const mobileSelectionRef = useRef<MobileTerminalSelectionManager | null>(null);
   const selectedProjectKey = selectedProject?.fullPath || selectedProject?.path || '';
   const hasSelectedProject = Boolean(selectedProject);
+
+  const fitVisibleTerminal = useCallback(() => {
+    const container = terminalContainerRef.current;
+    const terminal = terminalRef.current;
+    const addon = fitAddonRef.current;
+    if (!activeRef.current || !container?.clientWidth || !container.clientHeight || !terminal || !addon) return;
+
+    // xterm clamps a collapsed container to 2 columns by 1 row. Applying
+    // that layout would reflow scrollback and resize the remote PTY.
+    const size = addon.proposeDimensions();
+    if (!size || !(size.cols > 2 && size.rows > 1)) return;
+    addon.fit();
+    sendSocketMessage(wsRef.current, { type: 'resize', cols: terminal.cols, rows: terminal.rows });
+  }, [terminalContainerRef, terminalRef, wsRef]);
+
+  useEffect(() => {
+    activeRef.current = isActive;
+    if (!isActive || !isInitialized) return;
+    const frame = window.requestAnimationFrame(fitVisibleTerminal);
+    return () => window.cancelAnimationFrame(frame);
+  }, [fitVisibleTerminal, isActive, isInitialized]);
 
   useEffect(() => {
     ensureXtermFocusStyles();
@@ -221,7 +244,7 @@ export function useShellTerminal({
 
     fitAddonRef.current = null;
     setIsInitialized(false);
-  }, [fitAddonRef, terminalRef]);
+  }, [terminalRef]);
 
   useEffect(() => {
     const terminalContainer = terminalContainerRef.current;
@@ -260,17 +283,7 @@ export function useShellTerminal({
         onFontSizeChange: (fontSize) => {
           nextTerminal.options.fontSize = fontSize;
 
-          const currentFitAddon = fitAddonRef.current;
-          if (currentFitAddon) {
-            currentFitAddon.fit();
-            sendSocketMessage(wsRef.current, {
-              type: 'resize',
-              cols: nextTerminal.cols,
-              rows: nextTerminal.rows,
-            });
-          } else {
-            nextTerminal.refresh(0, nextTerminal.rows - 1);
-          }
+          fitVisibleTerminal();
         },
       },
     );
@@ -346,20 +359,7 @@ export function useShellTerminal({
       return true;
     });
 
-    window.setTimeout(() => {
-      const currentFitAddon = fitAddonRef.current;
-      const currentTerminal = terminalRef.current;
-      if (!currentFitAddon || !currentTerminal) {
-        return;
-      }
-
-      currentFitAddon.fit();
-      sendSocketMessage(wsRef.current, {
-        type: 'resize',
-        cols: currentTerminal.cols,
-        rows: currentTerminal.rows,
-      });
-    }, TERMINAL_INIT_DELAY_MS);
+    const initialFit = window.setTimeout(fitVisibleTerminal, TERMINAL_INIT_DELAY_MS);
 
     setIsInitialized(true);
 
@@ -375,25 +375,13 @@ export function useShellTerminal({
         window.clearTimeout(resizeTimeoutRef.current);
       }
 
-      resizeTimeoutRef.current = window.setTimeout(() => {
-        const currentFitAddon = fitAddonRef.current;
-        const currentTerminal = terminalRef.current;
-        if (!currentFitAddon || !currentTerminal) {
-          return;
-        }
-
-        currentFitAddon.fit();
-        sendSocketMessage(wsRef.current, {
-          type: 'resize',
-          cols: currentTerminal.cols,
-          rows: currentTerminal.rows,
-        });
-      }, TERMINAL_RESIZE_DELAY_MS);
+      resizeTimeoutRef.current = window.setTimeout(fitVisibleTerminal, TERMINAL_RESIZE_DELAY_MS);
     });
 
     resizeObserver.observe(terminalContainer);
 
     return () => {
+      window.clearTimeout(initialFit);
       terminalContainer.removeEventListener('copy', handleTerminalCopy);
       resizeObserver.disconnect();
       if (resizeTimeoutRef.current !== null) {
@@ -407,7 +395,7 @@ export function useShellTerminal({
   }, [
     closeSocket,
     disposeTerminal,
-    fitAddonRef,
+    fitVisibleTerminal,
     isRestarting,
     hasSelectedProject,
     minimal,

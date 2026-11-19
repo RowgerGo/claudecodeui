@@ -39,7 +39,7 @@ const setup = () => {
   });
   const onFileOpen = vi.fn();
   const { result } = renderHook(() => useFileOpenResolver(project, onFileOpen));
-  return { resolve: result.current, onFileOpen };
+  return { resolve: result.current.resolveFile, cancel: result.current.cancelLookup, onFileOpen };
 };
 
 test('an absolute path outside the project is passed through untouched', async () => {
@@ -88,4 +88,18 @@ test('surrounding whitespace never reaches the API as part of the path', async (
   second.resolve('nope.ts ');
   await waitFor(() => assert.equal(second.onFileOpen.mock.calls.length, 1));
   assert.equal(second.onFileOpen.mock.calls[0][0], 'nope.ts');
+});
+
+test('leaving a tool while a relative link resolves prevents it from reopening the editor', async () => {
+  const { resolve, cancel, onFileOpen } = setup();
+  let finish!: () => void;
+  searchFiles.mockImplementationOnce(() => new Promise(done => {
+    finish = () => done({ ok: true, json: async () => ({ entries: [{ path: '/repo/foo.ts' }] }) });
+  }));
+  resolve('foo.ts');
+  cancel();
+  assert.equal(searchFiles.mock.calls[0][2].signal.aborted, true);
+  finish();
+  await new Promise(done => setTimeout(done, 0));
+  assert.equal(onFileOpen.mock.calls.length, 0);
 });
