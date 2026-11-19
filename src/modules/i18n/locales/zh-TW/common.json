@@ -100,6 +100,8 @@
     "projectFiles": "專案檔案"
   },
   "fileTree": {
+    "loadMore": "載入更多",
+    "refineSearch": "還有更多符合項目，請輸入更具體的名稱或路徑。",
     "loading": "正在載入檔案...",
     "files": "檔案",
     "simpleView": "簡易檢視",

@@ -100,6 +100,8 @@
     "projectFiles": "プロジェクトファイル"
   },
   "fileTree": {
+    "loadMore": "さらに読み込む",
+    "refineSearch": "ほかにも一致する項目があります。名前やパスを追加して絞り込んでください。",
     "loading": "ファイルを読み込んでいます...",
     "files": "ファイル",
     "simpleView": "シンプル表示",

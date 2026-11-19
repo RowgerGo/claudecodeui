@@ -6,6 +6,7 @@ import mime from 'mime-types';
 import multer from 'multer';
 
 import { projectsDb } from '@/modules/database/index.js';
+import { openArchiveFile } from '@/modules/file-tree/file-tree-archive-filesystem.js';
 import { createFileTreeRouter } from '@/modules/file-tree/file-tree.routes.js';
 import { createFileTreeService } from '@/modules/file-tree/file-tree.service.js';
 import type {
@@ -54,6 +55,7 @@ const fileTreeFileSystem: FileTreeFileSystem = {
   unlink: (filePath) => fsPromises.unlink(filePath),
   copyFile: (sourcePath, destinationPath) => fsPromises.copyFile(sourcePath, destinationPath),
   createReadStream: (filePath) => fs.createReadStream(filePath),
+  openArchiveFile,
 };
 
 /**

@@ -1,19 +1,7 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 
-import { api } from '@/shared/api';
-import type { Project } from '@/shared/types';
-
-type FileNode = {
-  type: 'file' | 'directory';
-  name: string;
-  path: string;
-  children?: FileNode[];
-};
-
-type FlatFile = {
-  name: string;
-  path: string;
-};
+import { api, readApiJson } from '@/shared/api';
+import type { Project, ProjectFileSearchResult } from '@/shared/types';
 
 // `diffInfo` is intentionally `any` so this resolver can wrap editor handlers
 // that expect a concrete diff payload type as well as generic callers.
@@ -26,100 +14,43 @@ const normalize = (value: string): string => value.replace(/\\/g, '/');
 // POSIX one answer an honest 404 instead of opening some other file.
 const isAbsoluteRef = (value: string): boolean => /^(\/|[A-Za-z]:\/)/.test(value);
 
-const flatten = (nodes: FileNode[], out: FlatFile[]): void => {
-  for (const node of nodes) {
-    if (node.type === 'file') {
-      out.push({ name: node.name, path: node.path });
-    } else if (node.children && node.children.length > 0) {
-      flatten(node.children, out);
-    }
-  }
-};
-
-// References inside chat messages are often bare basenames (`foo.ts`) or partial
-// paths (`utils/foo.ts`) rather than full paths, so match by path suffix and
-// fall back to filename equality.
-const findBestMatch = (files: FlatFile[], ref: string): string | null => {
-  const target = normalize(ref).replace(/^\.\//, '').replace(/^\/+/, '');
-  if (!target) {
-    return null;
-  }
-
-  const suffixMatch = files.find((file) => {
-    const filePath = normalize(file.path);
-    return filePath === target || filePath.endsWith(`/${target}`);
-  });
-  if (suffixMatch) {
-    return suffixMatch.path;
-  }
-
-  const base = target.split('/').pop() || target;
-  return files.find((file) => file.name === base)?.path ?? null;
-};
-
-/**
- * Wraps an `onFileOpen` handler so a possibly bare/partial file reference is
- * resolved against the project's file tree (cached per project) before the file
- * is opened in the in-app editor.
- */
+/** Resolves relative links in chat and the workspace by path suffix, then by exact filename. */
 export function useFileOpenResolver(
   selectedProject: Project | null | undefined,
   onFileOpen: OnFileOpen,
 ): OnFileOpen {
   const projectId = selectedProject?.projectId;
-  const cacheRef = useRef<{ projectId?: string; files: Promise<FlatFile[]> | null }>({
-    projectId: undefined,
-    files: null,
-  });
+  const pending = useRef<AbortController | null>(null);
+  useEffect(() => () => pending.current?.abort(), [projectId]);
 
-  const loadFiles = useCallback((): Promise<FlatFile[]> => {
-    if (!projectId) {
-      return Promise.resolve([]);
+  return useCallback((filePath, diffInfo, line) => {
+    pending.current?.abort();
+    const ref = normalize(filePath).trim();
+    if (!projectId || !ref || isAbsoluteRef(ref)) {
+      onFileOpen(ref, diffInfo, line);
+      return;
     }
-    if (cacheRef.current.projectId === projectId && cacheRef.current.files) {
-      return cacheRef.current.files;
+    const controller = new AbortController();
+    pending.current = controller;
+
+    async function resolveReference() {
+      const suffix = ref.replace(/^\.\//, '');
+      const basename = suffix.split('/').pop();
+      // Try the full suffix first so a same-named file elsewhere cannot mask a more precise reference.
+      const candidates = basename && basename !== suffix ? [suffix, basename] : [suffix];
+      for (const query of candidates) {
+        const response = await api.searchProjectFiles(projectId!, query, {
+          filesOnly: true, limit: 1, match: 'suffix', signal: controller.signal,
+        });
+        const { entries } = await readApiJson<ProjectFileSearchResult>(response);
+        if (entries.length) return entries[0].path;
+        if (controller.signal.aborted) break;
+      }
+      return ref;
     }
 
-    const filesPromise = (async () => {
-      try {
-        const response = await api.getFiles(projectId);
-        if (!response.ok) {
-          return [];
-        }
-        const data = await response.json();
-        const tree: FileNode[] = Array.isArray(data) ? data : [];
-        const flat: FlatFile[] = [];
-        flatten(tree, flat);
-        return flat;
-      } catch {
-        return [];
-      }
-    })();
-
-    cacheRef.current = { projectId, files: filesPromise };
-    return filesPromise;
-  }, [projectId]);
-
-  return useCallback(
-    (filePath: string, diffInfo?: any, line?: number | null) => {
-      // Normalized once and used for every outcome: a reference picked up from
-      // link text can carry surrounding whitespace, which the API would take as
-      // part of the filename and answer with a 404.
-      const ref = normalize(filePath).trim();
-      // An absolute path already names one exact file: matching it against the
-      // tree can only send it somewhere else — `/home/user/.config/NOTES.md`
-      // used to fall through to the filename match and silently open the
-      // project's own `NOTES.md`. A path that exists is unaffected; one that no
-      // longer does now reports that instead of opening a same-named file.
-      if (isAbsoluteRef(ref)) {
-        onFileOpen(ref, diffInfo, line);
-        return;
-      }
-      void loadFiles().then((files) => {
-        const match = findBestMatch(files, ref);
-        onFileOpen(match ?? ref, diffInfo, line);
-      });
-    },
-    [loadFiles, onFileOpen],
-  );
+    void resolveReference().catch(() => ref).then(path => {
+      if (!controller.signal.aborted) onFileOpen(path, diffInfo, line);
+    });
+  }, [projectId, onFileOpen]);
 }

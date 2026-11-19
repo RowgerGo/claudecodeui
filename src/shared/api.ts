@@ -3,7 +3,7 @@ import {
   getStoredAuthToken,
   storeAuthToken,
 } from '@/shared/authToken';
-import { IS_PLATFORM } from '@/shared/utils';
+import { downloadBlob, IS_PLATFORM } from '@/shared/utils';
 import { readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
 import type { LLMProvider } from '@/shared/types';
 
@@ -191,6 +191,39 @@ export const sessionMessagesUrl = (
 const fileContentPath = (projectId: string, filePath: string) =>
   `/api/file-tree/projects/${projectId}/files/content${query({ path: filePath })}`;
 
+/** Saves the file panel's folder archive, piping the authenticated response directly to disk when supported. */
+export async function downloadProjectFolder(projectId: string, path: string): Promise<void> {
+  const filename = `${path.split(/[\\/]/).filter(Boolean).pop() || 'project'}.zip`;
+  const browser = window as Window & {
+    showSaveFilePicker?: (options: { suggestedName: string }) => Promise<FileSystemFileHandle>;
+  };
+  // Pick before the network request while the download click still grants user activation.
+  let handle: FileSystemFileHandle | undefined;
+  if (browser.showSaveFilePicker) {
+    try {
+      handle = await browser.showSaveFilePicker({ suggestedName: filename });
+    } catch (error) {
+      // Embedded/security-restricted contexts can expose the picker but disallow its use.
+      if (!(error instanceof DOMException && error.name === 'SecurityError')) throw error;
+    }
+  }
+
+  const response = await get(`/api/file-tree/projects/${encodeURIComponent(projectId)}/archive${query({ path })}`);
+  if (!response.ok) {
+    throw new Error(readApiErrorMessage(await response.json().catch(() => null)) ?? `Download failed (${response.status})`);
+  }
+  if (handle && response.body) {
+    try {
+      const destination = await handle.createWritable();
+      await response.body.pipeTo(destination);
+    } finally {
+      await response.body.cancel().catch(() => {});
+    }
+    return;
+  }
+  downloadBlob(await response.blob(), filename);
+}
+
 const pluginAssetPath = (pluginName: string, assetFile: string) =>
   `/api/plugins/${encodeURIComponent(pluginName)}/assets/${encodeURIComponent(assetFile)}`;
 
@@ -316,8 +349,13 @@ export const api = {
     get(fileContentPath(projectId, filePath), options),
   saveFile: (projectId: string, filePath: string, content: string) =>
     put(`/api/file-tree/projects/${projectId}/file`, { filePath, content }),
-  getFiles: (projectId: string, options: ApiRequestOptions = {}) =>
-    get(`/api/file-tree/projects/${projectId}/files${query({ respectGitignore: true })}`, options),
+  listFileDirectory: (
+    projectId: string, path: string, cursor?: string, options: ApiRequestOptions = {}, childName?: string,
+  ) => get(`/api/file-tree/projects/${encodeURIComponent(projectId)}/directory${query({ path, cursor, childName })}`, options),
+  searchProjectFiles: (
+    projectId: string, q: string,
+    { signal, limit, filesOnly, match }: { signal?: AbortSignal; limit?: number; filesOnly?: boolean; match?: 'suffix' } = {},
+  ) => get(`/api/file-tree/projects/${encodeURIComponent(projectId)}/search${query({ q, limit, filesOnly, match })}`, { signal }),
 
   // File operations
   createFile: (

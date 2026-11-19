@@ -207,7 +207,6 @@
     "i18next": "^25.7.4",
     "ignore": "^7.0.6",
     "jsonwebtoken": "^9.0.2",
-    "jszip": "^3.10.1",
     "katex": "^0.16.25",
     "lucide-react": "^0.515.0",
     "mermaid": "^11.16.1",
@@ -231,7 +230,8 @@
     "remark-math": "^6.0.0",
     "tailwind-merge": "^3.3.1",
     "web-push": "^3.6.7",
-    "ws": "^8.14.2"
+    "ws": "^8.14.2",
+    "zip-stream": "^7.0.5"
   },
   "devDependencies": {
     "@commitlint/cli": "^20.5.0",
@@ -250,6 +250,7 @@
     "@types/react-dom": "^18.2.17",
     "@types/react-syntax-highlighter": "^15.5.13",
     "@types/ws": "^8.18.1",
+    "@types/zip-stream": "^7.0.0",
     "@vitejs/plugin-react": "^4.6.0",
     "auto-changelog": "^2.5.0",
     "autoprefixer": "^10.4.16",
@@ -264,6 +265,7 @@
     "eslint-plugin-tailwindcss": "^3.18.2",
     "husky": "^9.1.7",
     "jsdom": "^26.1.0",
+    "jszip": "^3.10.1",
     "lint-staged": "^16.3.2",
     "node-gyp": "^10.0.0",
     "oxlint": "^1.79.0",

@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import { createReadStream } from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { buffer } from 'node:stream/consumers';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import JSZip from 'jszip';
+
+import { openArchiveFile } from '@/modules/file-tree/file-tree-archive-filesystem.js';
 import { createFileTreeService } from '@/modules/file-tree/file-tree.service.js';
 import type {
   FileTreeDirectoryEntry,
@@ -71,6 +76,7 @@ function createFakeFileSystem(
     unlink: unexpectedOperation,
     copyFile: unexpectedOperation,
     createReadStream: () => Readable.from([]),
+    openArchiveFile: unexpectedOperation,
     ...overrides,
   };
 }
@@ -331,6 +337,144 @@ test('listProjectFiles shares the entry limit across nested directories', async 
   );
 });
 
+test('directory listing pages a wide directory without walking children or statting off-page entries', async () => {
+  const root = path.resolve('file-tree-test-project');
+  const count = 10_017;
+  const entries = Array.from({ length: count }, (_, i) =>
+    createDirectoryEntry(`item-${String(count - i).padStart(5, '0')}`, false));
+  entries.push(createDirectoryEntry('src', true));
+  let statsRead = 0;
+  const service = createFileTreeService(createDependencies(createFakeFileSystem({
+    realpath: async (candidate) => candidate,
+    stat: async () => createStats(true, 0o755),
+    readTextFile: async () => '',
+    openDirectory: createDirectoryReader((dir) => {
+      assert.equal(dir, root);
+      return entries;
+    }),
+    lstat: async () => {
+      statsRead++;
+      return createStats(false, 0o644);
+    },
+  }), root));
+
+  const page = await service.listProjectDirectory('project', { path: '', childName: 'item-10017' });
+  assert.equal(page.entries.length, 200);
+  assert.equal(statsRead, 201);
+  assert.equal(page.entries[0].name, 'src');
+  assert.equal(page.entries[0].children, undefined);
+  assert.equal(page.matchedEntry?.name, 'item-10017');
+  assert.ok(page.nextCursor);
+  // Remove an entry before the cursor and reorder the directory as a real
+  // filesystem can between requests. The continuation still starts correctly.
+  entries.splice(entries.findIndex((entry) => entry.name === 'item-00001'), 1);
+  entries.reverse();
+  const second = await service.listProjectDirectory('project', { path: root, cursor: page.nextCursor });
+  assert.equal(second.entries[0].name, 'item-00200');
+  assert.equal(second.entries.at(-1)?.name, 'item-00399');
+  const last = await service.listProjectDirectory('project', { path: root, cursor: '1item-10000' });
+  assert.equal(last.entries.length, 17);
+  assert.equal(last.nextCursor, null);
+});
+
+test('search reaches unopened deep folders, applies ignores, limits results and matches partial paths', async () => {
+  const root = path.resolve('file-tree-test-project');
+  const segments = Array.from({ length: 12 }, (_, i) => `level-${i}`);
+  const deep = path.join(root, ...segments);
+  const listed = new Set<string>();
+  const service = createFileTreeService(createDependencies(createFakeFileSystem({
+    realpath: async (candidate) => candidate,
+    stat: async () => createStats(true, 0o755),
+    readTextFile: async () => 'generated/',
+    lstat: async () => createStats(false, 0o644),
+    openDirectory: createDirectoryReader((dir) => {
+      listed.add(dir);
+      if (dir === root) return [
+        createDirectoryEntry('node_modules', true), createDirectoryEntry('generated', true),
+        createDirectoryEntry('unreadable', true), createDirectoryEntry(segments[0], true),
+      ];
+      if (dir.endsWith('unreadable')) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      if (dir === deep) return [
+        createDirectoryEntry('target.ts', false), createDirectoryEntry('TARGET.ts.map', false),
+      ];
+      const depth = path.relative(root, dir).split(path.sep).length;
+      return [createDirectoryEntry(segments[depth], true)];
+    }),
+  }), root));
+
+  const results = await service.searchProjectFiles('project', { query: 'TARGET.TS', filesOnly: true, limit: 1 });
+  assert.equal(results.truncated, true);
+  assert.equal(results.entries[0].relativePath, [...segments, 'target.ts'].join('/'));
+  assert.ok(results.entries[0].path.startsWith(root));
+  const suffix = await service.searchProjectFiles('project', {
+    query: 'level-11/target.ts', filesOnly: true, limit: 10, match: 'suffix',
+  });
+  assert.deepEqual(suffix.entries.map((entry) => entry.name), ['target.ts']);
+  assert.equal(suffix.truncated, false);
+  assert.ok(listed.has(path.join(root, 'unreadable')));
+  assert.ok(!listed.has(path.join(root, 'generated')));
+  assert.ok(!listed.has(path.join(root, 'node_modules')));
+});
+
+test('suffix lookup prefers the exact project-relative file over a nested copy', async () => {
+  const root = path.resolve('file-tree-test-project');
+  const service = createFileTreeService(createDependencies(createFakeFileSystem({
+    realpath: async (candidate) => candidate,
+    stat: async () => createStats(true, 0o755),
+    lstat: async () => createStats(false, 0o644),
+    readTextFile: async () => '',
+    openDirectory: createDirectoryReader((dir) => {
+      if (dir === root) return [createDirectoryEntry('src', true), createDirectoryEntry('nested', true)];
+      if (dir === path.join(root, 'nested')) return [createDirectoryEntry('src', true)];
+      return [createDirectoryEntry('main.ts', false)];
+    }),
+  }), root));
+  const result = await service.searchProjectFiles('project', {
+    query: 'src/main.ts', limit: 1, filesOnly: true, match: 'suffix',
+  });
+  assert.equal(result.entries[0].relativePath, 'src/main.ts');
+  assert.equal(result.truncated, true);
+});
+
+test('direct directory requests reject outside, ignored and symlinked paths', async () => {
+  const root = path.resolve('file-tree-test-project');
+  const service = createFileTreeService(createDependencies(createFakeFileSystem({
+    realpath: async (candidate) => candidate === path.join(root, 'link', 'child')
+      ? path.resolve('outside', 'child') : candidate,
+    stat: async () => createStats(true, 0o755),
+    readTextFile: async () => 'generated/',
+  }), root));
+  for (const requested of ['../outside', 'node_modules/nested', 'generated/child', 'link/child']) {
+    await assert.rejects(service.listProjectDirectory('project', { path: requested }), (error: unknown) =>
+      error instanceof AppError && error.statusCode === 403);
+  }
+});
+
+test('aborted searches close the directory iterator without examining the remaining entries', async () => {
+  const root = path.resolve('file-tree-test-project');
+  const controller = new AbortController();
+  let closed = false;
+  const service = createFileTreeService(createDependencies(createFakeFileSystem({
+    realpath: async (candidate) => candidate,
+    stat: async () => createStats(true, 0o755),
+    readTextFile: async () => '',
+    openDirectory: async function* () {
+      try {
+        yield createDirectoryEntry('first.ts', false);
+        controller.abort();
+        yield createDirectoryEntry('next.ts', false);
+        assert.fail('search must stop reading');
+      } finally {
+        closed = true;
+      }
+    },
+  }), root));
+  await assert.rejects(service.searchProjectFiles('project', {
+    query: 'unmatched', limit: 10, filesOnly: true, signal: controller.signal,
+  }), { name: 'AbortError' });
+  assert.equal(closed, true);
+});
+
 test('readTextFile rejects traversal before invoking the filesystem adapter', async () => {
   const projectRoot = path.resolve('file-tree-test-project');
   const readPaths: string[] = [];
@@ -425,6 +569,7 @@ function createRealFileSystemService(projectRoot: string, workspaceRoot = projec
       unlink: (filePath) => fsPromises.unlink(filePath),
       copyFile: (source, destination) => fsPromises.copyFile(source, destination),
       createReadStream: (filePath) => createReadStream(filePath),
+      openArchiveFile,
     },
     projects: { getProjectPathById: async () => projectRoot },
     workspace: {
@@ -437,6 +582,62 @@ function createRealFileSystemService(projectRoot: string, workspaceRoot = projec
     logger: { error: () => undefined },
   });
 }
+
+test('folder archives include filtered unopened descendants, raw bytes and empty directories', async (t) => {
+  const fixture = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'file-tree-archive-'));
+  t.after(() => fsPromises.rm(fixture, { recursive: true, force: true }));
+  const root = path.join(fixture, 'project');
+  const folder = path.join(root, 'folder');
+  await fsPromises.mkdir(path.join(folder, 'nested', 'empty'), { recursive: true });
+  await fsPromises.mkdir(path.join(folder, 'node_modules'));
+  await fsPromises.writeFile(path.join(root, '.gitignore'), '*.log');
+  const bytes = Buffer.from([0, 127, 255, 195, 128]);
+  await fsPromises.writeFile(path.join(folder, 'nested', '文件.bin'), bytes);
+  await fsPromises.writeFile(path.join(folder, 'ignored.log'), 'excluded');
+  await fsPromises.writeFile(path.join(fixture, 'outside.txt'), 'outside');
+  await fsPromises.symlink(path.join(fixture, 'outside.txt'), path.join(folder, 'file-link'));
+  await fsPromises.symlink(fixture, path.join(folder, 'dir-link'), 'dir');
+  const service = createRealFileSystemService(root);
+  const signal = new AbortController().signal;
+  const archive = await service.openFolderArchive('project-1', 'folder', signal);
+  assert.equal(archive.filename, 'folder.zip');
+  const zip = await JSZip.loadAsync(await buffer(archive.stream), { checkCRC32: true });
+  assert.deepEqual(Object.keys(zip.files).sort(), ['nested/', 'nested/empty/', 'nested/文件.bin']);
+  assert.deepEqual(await zip.files['nested/文件.bin'].async('nodebuffer'), bytes);
+  for (const forbidden of ['folder/node_modules', 'folder/dir-link', '..']) {
+    await assert.rejects(service.openFolderArchive('project-1', forbidden, signal),
+      (error: unknown) => error instanceof AppError && error.statusCode === 403);
+  }
+});
+
+test('cancelling an archive closes its current source without processing another file', async () => {
+  const root = path.resolve('file-tree-test-project');
+  const source = new Readable({ read() {} });
+  const sourceClosed = once(source, 'close');
+  let filesOpened = 0;
+  const fileSystem = createFakeFileSystem({
+    realpath: async (candidate) => candidate,
+    readTextFile: async () => '',
+    stat: async () => createStats(true, 0o040755),
+    lstat: async () => createStats(false, 0o100644),
+    openDirectory: createDirectoryReader(() => [
+      createDirectoryEntry('first.bin', false), createDirectoryEntry('second.bin', false),
+    ]),
+    openArchiveFile: async () => {
+      filesOpened++;
+      return source;
+    },
+  });
+  const service = createFileTreeService(createDependencies(fileSystem, root));
+  const controller = new AbortController();
+  const { stream } = await service.openFolderArchive('project-1', '.', controller.signal);
+  const completed = buffer(stream);
+  await once(stream, 'data');
+  controller.abort();
+  await assert.rejects(completed, { name: 'AbortError' });
+  await sourceClosed;
+  assert.equal(filesOpened, 1);
+});
 
 test('the temp directory can be browsed and read, but never written to', async () => {
   const temporaryDirectory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'file-tree-tmp-'));

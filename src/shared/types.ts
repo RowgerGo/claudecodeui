@@ -1131,6 +1131,25 @@ export type FileTreeNode = {
   [key: string]: unknown;
 };
 
+/** One sorted page of directory children, with an optional direct child requested for revealing a path. */
+export type FileDirectoryPage = {
+  entries: FileTreeNode[];
+  nextCursor: string | null;
+  matchedEntry?: FileTreeNode;
+};
+
+/** Bounded project-wide path matches. Each relative path uses '/' so it can be shown or inserted in chat. */
+export type ProjectFileSearchResult = {
+  entries: (FileTreeNode & { relativePath: string })[];
+  truncated: boolean;
+};
+
+/** A file suggested by the chat composer, with the project-relative path inserted into the message. */
+export type MentionableFile = {
+  name: string;
+  path: string;
+};
+
 /** The image the file tree asked to preview, carrying the path plus the DB `projectId` the image viewer needs to build its raw content URL. */
 export type FileTreeImageSelection = {
   name: string;

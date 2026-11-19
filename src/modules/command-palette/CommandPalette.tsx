@@ -32,7 +32,7 @@ import { usePaletteOps } from '@/modules/command-palette/context/PaletteOpsConte
 import { SETTINGS_MAIN_TABS } from '@/shared/constants';
 import type { AppTab, Project } from '@/shared/types';
 import { useSessionsSource } from '@/modules/command-palette/hooks/useSessionsSource';
-import { useFilesSource } from '@/modules/command-palette/hooks/useFilesSource';
+import { useProjectFileSearch } from '@/shared/hooks/useProjectFileSearch';
 import { useCommitsSource } from '@/modules/command-palette/hooks/useCommitsSource';
 import { useSessionMessageSearch } from '@/modules/command-palette/hooks/useSessionMessageSearch';
 import { useBranchesSource } from '@/modules/command-palette/hooks/useBranchesSource';
@@ -100,7 +100,9 @@ function CommandPalette({
 
   const sessions = useSessionsSource(projectId, open && showSessions);
   const messageMatches = useSessionMessageSearch(projectId, search, open && showSessions);
-  const files = useFilesSource(projectId, open && showFiles);
+  const { entries: files, truncated: moreFiles } = useProjectFileSearch(projectId, open && showFiles ? search : null, {
+    filesOnly: true, limit: page === 'files' ? 100 : 5,
+  });
   const commits = useCommitsSource(projectId, open && showCommits);
   const branches = useBranchesSource(projectId, open && showBranches);
   const git = useGitActions(projectId);
@@ -309,8 +311,8 @@ function CommandPalette({
                     <span className="truncate text-xs text-muted-foreground">{f.path}</span>
                   </CommandItem>
                 ))}
-                {!page && files.length > browseLimit && (
-                  <BrowseAllItem label={t('commandPalette.browseAllFiles', { count: files.length })} onSelect={() => pushPage('files')} />
+                {!page && moreFiles && (
+                  <BrowseAllItem label={t('commandPalette.searchPage', { page: t('commandPalette.pages.files').toLowerCase() })} onSelect={() => pushPage('files')} />
                 )}
               </CommandGroup>
             )}

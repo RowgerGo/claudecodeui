@@ -1,3 +1,5 @@
+import { pipeline } from 'node:stream/promises';
+
 import express from 'express';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
@@ -39,6 +41,22 @@ function readOptionalString(value: unknown): string | null {
 
 function readProjectId(request: Request): string {
   return readRequiredString(request.params.projectId, 'projectId');
+}
+
+function readQueryString(value: unknown, name: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.includes('\0')) {
+    throw new AppError(`Invalid ${name}`, { code: 'INVALID_FILE_TREE_REQUEST', statusCode: 400 });
+  }
+  return value;
+}
+
+// The client cancels obsolete searches and directory loads. Stop filesystem
+// work as soon as the response socket closes, including on project switches.
+function responseSignal(response: Response): AbortSignal {
+  const controller = new AbortController();
+  response.once('close', () => controller.abort());
+  return controller.signal;
 }
 
 function readEntryType(value: unknown): 'file' | 'directory' {
@@ -90,6 +108,7 @@ function createRouteHandler(
     try {
       await operation(request, response);
     } catch (error) {
+      if (response.destroyed) return;
       if (error instanceof AppError) {
         response.status(error.statusCode).json({ error: error.message });
         return;
@@ -130,6 +149,15 @@ export function createFileTreeRouter(
     response.json(await services.readTextFile(readProjectId(request), filePath));
   }, logger));
 
+  router.get('/projects/:projectId/archive', createRouteHandler(async (request, response) => {
+    const folderPath = readRequiredString(readQueryString(request.query.path, 'path'), 'path');
+    const signal = responseSignal(response);
+    const archive = await services.openFolderArchive(readProjectId(request), folderPath, signal);
+    response.attachment(archive.filename).type('application/zip').set('Cache-Control', 'no-store');
+    // A stream failure destroys the response so partial ZIPs fail to download.
+    await pipeline(archive.stream, response, { signal });
+  }, logger));
+
   router.get('/projects/:projectId/files/content', createRouteHandler(async (request, response) => {
     const filePath = readRequiredString(request.query.path, 'path', 'Invalid file path');
     const file = await services.openFile(readProjectId(request), filePath);
@@ -159,6 +187,38 @@ export function createFileTreeRouter(
       });
     }
     response.json(await services.saveTextFile(readProjectId(request), filePath, body.content));
+  }, logger));
+
+  router.get('/projects/:projectId/directory', createRouteHandler(async (request, response) => {
+    const page = await services.listProjectDirectory(readProjectId(request), {
+      path: readQueryString(request.query.path, 'directory path') ?? '',
+      cursor: readQueryString(request.query.cursor, 'directory cursor'),
+      childName: readQueryString(request.query.childName, 'child name'),
+      signal: responseSignal(response),
+    });
+    response.json(page);
+  }, logger));
+
+  router.get('/projects/:projectId/search', createRouteHandler(async (request, response) => {
+    const limitValue = readQueryString(request.query.limit, 'search limit');
+    const limit = limitValue === undefined ? 100 : Number(limitValue);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new AppError('Search limit must be between 1 and 500', {
+        code: 'INVALID_SEARCH_LIMIT', statusCode: 400,
+      });
+    }
+    const match = readQueryString(request.query.match, 'search mode');
+    if (match !== undefined && match !== 'suffix') {
+      throw new AppError('Invalid search mode', { code: 'INVALID_SEARCH_MODE', statusCode: 400 });
+    }
+    const results = await services.searchProjectFiles(readProjectId(request), {
+      query: readQueryString(request.query.q, 'search query') ?? '',
+      limit,
+      filesOnly: request.query.filesOnly === 'true',
+      match,
+      signal: responseSignal(response),
+    });
+    response.json(results);
   }, logger));
 
   router.get('/projects/:projectId/files', createRouteHandler(async (request, response) => {

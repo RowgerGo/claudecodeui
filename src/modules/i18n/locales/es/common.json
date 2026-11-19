@@ -114,6 +114,8 @@
     "renameSessionLabel": "Título de la sesión"
   },
   "fileTree": {
+    "loadMore": "Cargar más",
+    "refineSearch": "Hay más coincidencias. Especifica un nombre o una ruta más precisa.",
     "loading": "Cargando archivos...",
     "files": "Archivos",
     "simpleView": "Vista simple",

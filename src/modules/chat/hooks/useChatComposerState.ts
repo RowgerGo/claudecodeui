@@ -117,11 +117,6 @@ type UseChatComposerStateArgs = {
   supportsSideQuestions?: boolean;
 };
 
-type MentionableFile = {
-  name: string;
-  path: string;
-};
-
 type CommandExecutionResult = {
   type: 'builtin' | 'custom';
   action?: string;
@@ -2161,7 +2156,7 @@ export function useChatComposerState({
     handleCommandSelect,
     handleToggleCommandMenu,
     showFileDropdown,
-    filteredFiles: filteredFiles as MentionableFile[],
+    filteredFiles,
     selectedFileIndex,
     renderInputWithMentions,
     selectFile,

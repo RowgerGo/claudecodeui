@@ -1,7 +1,5 @@
 import type { TFunction } from 'i18next';
 
-import type { FileTreeNode } from '@/shared/types';
-
 const IMAGE_FILE_EXTENSIONS = new Set([
   'png',
   'jpg',
@@ -13,40 +11,7 @@ const IMAGE_FILE_EXTENSIONS = new Set([
   'bmp',
 ]);
 
-export function filterFileTree(items: FileTreeNode[], query: string): FileTreeNode[] {
-  return items.reduce<FileTreeNode[]>((filteredItems, item) => {
-    const matchesName = item.name.toLowerCase().includes(query);
-    const filteredChildren =
-      item.type === 'directory' && item.children ? filterFileTree(item.children, query) : [];
-
-    if (matchesName || filteredChildren.length > 0) {
-      filteredItems.push({
-        ...item,
-        children: filteredChildren,
-      });
-    }
-
-    return filteredItems;
-  }, []);
-}
-
-// During search we auto-expand every directory present in the filtered subtree.
-export function collectExpandedDirectoryPaths(items: FileTreeNode[]): string[] {
-  const paths: string[] = [];
-
-  const visit = (nodes: FileTreeNode[]) => {
-    nodes.forEach((node) => {
-      if (node.type === 'directory' && node.children && node.children.length > 0) {
-        paths.push(node.path);
-        visit(node.children);
-      }
-    });
-  };
-
-  visit(items);
-  return paths;
-}
-
+/** Used by FileTree to display the size of each loaded file. */
 export function formatFileSize(bytes?: number): string {
   if (!bytes || bytes === 0) {
     return '0 B';
@@ -59,6 +24,7 @@ export function formatFileSize(bytes?: number): string {
   return `${(bytes / Math.pow(base, index)).toFixed(1).replace(/\.0$/, '')} ${sizes[index]}`;
 }
 
+/** Used by FileTree to localize modification times in its detailed view. */
 export function formatRelativeTime(date: string | undefined, t: TFunction): string {
   if (!date) {
     return '-';
@@ -87,6 +53,7 @@ export function formatRelativeTime(date: string | undefined, t: TFunction): stri
   return past.toLocaleDateString();
 }
 
+/** Used by FileTree to choose its image viewer when opening a file. */
 export function isImageFile(filename: string): boolean {
   const extension = filename.split('.').pop()?.toLowerCase();
   return Boolean(extension && IMAGE_FILE_EXTENSIONS.has(extension));

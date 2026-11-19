@@ -100,6 +100,8 @@
     "projectFiles": "Projektdateien"
   },
   "fileTree": {
+    "loadMore": "Mehr laden",
+    "refineSearch": "Es gibt weitere Treffer. Grenze die Suche durch einen genaueren Namen oder Pfad ein.",
     "loading": "Dateien werden geladen...",
     "files": "Dateien",
     "simpleView": "Einfache Ansicht",

@@ -9,7 +9,7 @@ import { MAX_FILE_UPLOAD_SIZE_BYTES, MAX_FILE_UPLOAD_SIZE_LABEL } from '@/shared
 
 type UseFileTreeUploadOptions = {
   selectedProject: Project | null;
-  onRefresh: () => void;
+  onRefresh: (directory: string) => void;
   showToast: (message: string, type: 'success' | 'error') => void;
 };
 
@@ -235,6 +235,7 @@ const collectDroppedFiles = async (dataTransfer: DataTransfer) => {
   return files;
 };
 
+/** Used by the Files panel for upload targets, progress and refreshing the affected directories. */
 export const useFileTreeUpload = ({
   selectedProject,
   onRefresh,
@@ -347,13 +348,22 @@ export const useFileTreeUpload = ({
 
         showToast(formatUploadSuccessMessage(uploadedCount, requestedFileCount), 'success');
         scheduleProgressClear(COMPLETE_PROGRESS_CLEAR_DELAY_MS);
-        onRefresh();
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Upload failed';
         console.error('Upload error:', err);
         showToast(message, 'error');
         setUploadError(message, files.length, targetPath, fileName, latestProgress);
       } finally {
+        // A multi-file upload can write part of a folder before a later item fails.
+        const affected = new Set([targetPath]);
+        for (const file of files) {
+          let directory = targetPath;
+          for (const segment of getRelativePath(file).split(/[\\/]/).slice(0, -1)) {
+            directory = directory ? directory + '/' + segment : segment;
+            affected.add(directory);
+          }
+        }
+        affected.forEach((directory) => onRefresh(directory));
         setOperationLoading(false);
         setDropTarget(null);
       }

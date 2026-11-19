@@ -100,6 +100,8 @@
     "projectFiles": "项目文件"
   },
   "fileTree": {
+    "loadMore": "加载更多",
+    "refineSearch": "还有更多匹配项，请输入更具体的名称或路径。",
     "loading": "正在加载文件...",
     "files": "文件",
     "simpleView": "简单视图",

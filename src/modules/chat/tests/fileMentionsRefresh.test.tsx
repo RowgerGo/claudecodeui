@@ -13,26 +13,31 @@ import type { Project } from '@/shared/types';
  * reload or a project switch.
  */
 
-const getFiles = vi.fn();
+const searchFiles = vi.fn();
 
-vi.mock('@/shared/api', () => ({
-  api: { getFiles: (...args: unknown[]) => getFiles(...args) },
-}));
+vi.mock(import('@/shared/api'), async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, api: { ...actual.api, searchProjectFiles: (...args) => searchFiles(...args) } };
+});
 
 const { useFileMentions } = await import('@/modules/chat/hooks/useFileMentions');
 
 const ROOT = '/home/user/project';
 const project: Project = { projectId: 'p1', displayName: 'project', fullPath: ROOT };
 
-const fileNode = (name: string) => ({ type: 'file', name, path: `${ROOT}/${name}` });
-const treeResponse = (names: string[]) => ({ ok: true, json: async () => names.map(fileNode) });
+const searchResponse = (paths: string[]) => ({
+  ok: true,
+  json: async () => ({
+    entries: paths.map(relativePath => ({
+      type: 'file', name: relativePath.split('/').pop(), relativePath, path: `${ROOT}/${relativePath}`,
+    })),
+    truncated: false,
+  }),
+});
 
-// A getFiles response the test resolves by hand, to hold a request in flight.
-const deferredTreeResponse = () => {
-  let resolve: (names: string[]) => void = () => {};
-  const promise = new Promise<ReturnType<typeof treeResponse>>((resolvePromise) => {
-    resolve = (names) => resolvePromise(treeResponse(names));
-  });
+const deferredResponse = () => {
+  let resolve!: (value: ReturnType<typeof searchResponse>) => void;
+  const promise = new Promise<ReturnType<typeof searchResponse>>(done => { resolve = done; });
   return { promise, resolve };
 };
 
@@ -60,161 +65,70 @@ const renderMentions = () => {
   return { ...hook, type, shownNames };
 };
 
-test('a file added after the list was loaded shows up the next time `@` opens the dropdown', async () => {
-  getFiles.mockReset();
-  getFiles.mockResolvedValueOnce(treeResponse(['a.txt']));
-  getFiles.mockResolvedValue(treeResponse(['a.txt', 'uploaded.txt']));
-
-  const { type, shownNames } = renderMentions();
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 1));
-
+test('searches only while a mention is active, and finds a new file in an unopened directory on reopen', async () => {
+  searchFiles.mockReset().mockResolvedValueOnce(searchResponse([]))
+    .mockResolvedValueOnce(searchResponse(['deep/new/uploaded.txt']));
+  const { type, shownNames, result } = renderMentions();
+  assert.equal(searchFiles.mock.calls.length, 0);
   type('@upl');
-
+  await waitFor(() => assert.equal(searchFiles.mock.calls.length, 1));
+  type('@upl ');
+  type('@upl @upl');
   await waitFor(() => assert.deepEqual(shownNames(), ['uploaded.txt']));
-  assert.equal(getFiles.mock.calls.length, 2);
+  assert.equal(searchFiles.mock.calls[1][1], 'upl');
+  assert.equal(searchFiles.mock.calls[1][2].limit, 10);
+  assert.equal(result.current.filteredFiles[0].path, 'deep/new/uploaded.txt');
 });
 
-test('typing the query while the dropdown stays open does not refetch on every keystroke', async () => {
-  getFiles.mockReset();
-  getFiles.mockResolvedValue(treeResponse(['a.txt', 'b.txt']));
-
+test('rapid keystrokes are combined into a single bounded search', async () => {
+  searchFiles.mockReset().mockResolvedValue(searchResponse(['a.txt']));
   const { type, shownNames } = renderMentions();
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 1));
-
   type('@');
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 2));
   type('@a');
   type('@a.');
   type('@a.t');
-
   await waitFor(() => assert.deepEqual(shownNames(), ['a.txt']));
-  assert.equal(getFiles.mock.calls.length, 2);
-
-  // Closing the dropdown (a space ends the query) and typing `@` again refetches once more.
-  type('@a.t ');
-  type('@a.t @');
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 3));
+  assert.equal(searchFiles.mock.calls.length, 1);
+  assert.equal(searchFiles.mock.calls[0][1], 'a.t');
 });
 
-test('the previous list stays visible while the refetch is in flight', async () => {
-  getFiles.mockReset();
-  getFiles.mockResolvedValueOnce(treeResponse(['a.txt']));
-  const refetch = deferredTreeResponse();
-  getFiles.mockReturnValueOnce(refetch.promise);
-
+test('an older query cannot replace results after a newer one completes', async () => {
+  const older = deferredResponse();
+  searchFiles.mockReset().mockReturnValueOnce(older.promise).mockResolvedValueOnce(searchResponse(['new.txt']));
   const { type, shownNames } = renderMentions();
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 1));
+  type('@old');
+  await waitFor(() => assert.equal(searchFiles.mock.calls.length, 1));
+  type('@new');
+  await waitFor(() => assert.deepEqual(shownNames(), ['new.txt']));
+  assert.equal(searchFiles.mock.calls[0][2].signal.aborted, true);
+  await act(async () => older.resolve(searchResponse(['old.txt'])));
+  assert.deepEqual(shownNames(), ['new.txt']);
+});
 
+test('reopening an identical query retains its previous results while refreshing them', async () => {
+  const refresh = deferredResponse();
+  searchFiles.mockReset().mockResolvedValueOnce(searchResponse(['a.txt'])).mockReturnValueOnce(refresh.promise);
+  const { type, shownNames } = renderMentions();
   type('@');
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 2));
+  await waitFor(() => assert.deepEqual(shownNames(), ['a.txt']));
+  type('@ ');
+  type('@ @');
+  await waitFor(() => assert.equal(searchFiles.mock.calls.length, 2));
   assert.deepEqual(shownNames(), ['a.txt']);
-
-  await act(async () => {
-    refetch.resolve(['a.txt', 'new.txt']);
-  });
+  await act(async () => refresh.resolve(searchResponse(['a.txt', 'new.txt'])));
   await waitFor(() => assert.deepEqual(shownNames(), ['a.txt', 'new.txt']));
 });
 
-test('an older refetch that lands after a newer one cannot overwrite it', async () => {
-  getFiles.mockReset();
-  getFiles.mockResolvedValueOnce(treeResponse(['a.txt']));
-  const olderRefetch = deferredTreeResponse();
-  const newerRefetch = deferredTreeResponse();
-  getFiles.mockReturnValueOnce(olderRefetch.promise);
-  getFiles.mockReturnValueOnce(newerRefetch.promise);
-
-  const { type, shownNames } = renderMentions();
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 1));
-
-  type('@');
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 2));
-  type('@ ');
-  type('@ @');
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 3));
-
-  // The newer request superseded the older one.
-  const olderSignal = (getFiles.mock.calls[1][1] as { signal: AbortSignal }).signal;
-  assert.equal(olderSignal.aborted, true);
-
-  await act(async () => {
-    newerRefetch.resolve(['a.txt', 'newer.txt']);
-  });
-  await waitFor(() => assert.deepEqual(shownNames(), ['a.txt', 'newer.txt']));
-
-  await act(async () => {
-    olderRefetch.resolve(['a.txt', 'older.txt']);
-  });
-  assert.deepEqual(shownNames(), ['a.txt', 'newer.txt']);
-});
-
-test('a refetch that lands after Escape dismissed the dropdown does not re-open it', async () => {
-  getFiles.mockReset();
-  getFiles.mockResolvedValueOnce(treeResponse(['a.txt']));
-  const refetch = deferredTreeResponse();
-  getFiles.mockReturnValueOnce(refetch.promise);
-  getFiles.mockResolvedValue(treeResponse(['a.txt', 'new.txt']));
-
-  const { result, type, shownNames } = renderMentions();
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 1));
-
-  type('mail me at foo@');
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 2));
-  assert.equal(result.current.showFileDropdown, true);
-
-  act(() => {
-    result.current.handleFileMentionsKeyDown(keyEvent('Escape'));
-  });
+test('Escape cancels an in-flight query, leaves Enter for the composer and allows the next edit', async () => {
+  const pending = deferredResponse();
+  searchFiles.mockReset().mockReturnValueOnce(pending.promise).mockResolvedValueOnce(searchResponse(['new.txt']));
+  const { type, result, shownNames } = renderMentions();
+  type('mail foo@');
+  await waitFor(() => assert.equal(searchFiles.mock.calls.length, 1));
+  act(() => { result.current.handleFileMentionsKeyDown(keyEvent('Escape')); });
+  await act(async () => pending.resolve(searchResponse(['old.txt'])));
   assert.equal(result.current.showFileDropdown, false);
-
-  // Let the refetch, which brings a changed list, finish completely.
-  await act(async () => {
-    refetch.resolve(['a.txt', 'new.txt']);
-    await new Promise((resolveTimeout) => setTimeout(resolveTimeout, 0));
-  });
-
-  // Still dismissed, so the next Enter reaches the composer and sends the message.
-  assert.equal(result.current.showFileDropdown, false);
-  let enterHandled = true;
-  act(() => {
-    enterHandled = result.current.handleFileMentionsKeyDown(keyEvent('Enter'));
-  });
-  assert.equal(enterHandled, false);
-  assert.equal(getFiles.mock.calls.length, 2);
-
-  // Typing on inside the query re-opens the dropdown, which fetches again.
-  type('mail me at foo@ne');
+  assert.equal(result.current.handleFileMentionsKeyDown(keyEvent('Enter')), false);
+  type('mail foo@ne');
   await waitFor(() => assert.deepEqual(shownNames(), ['new.txt']));
-  assert.equal(getFiles.mock.calls.length, 3);
-});
-
-test('Escape before any file matched stops a late refetch from showing the dropdown', async () => {
-  getFiles.mockReset();
-  getFiles.mockResolvedValueOnce(treeResponse(['a.txt']));
-  const refetch = deferredTreeResponse();
-  getFiles.mockReturnValueOnce(refetch.promise);
-
-  const { result, type, shownNames } = renderMentions();
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 1));
-
-  // Nothing in the loaded list matches yet, so no dropdown is shown.
-  type('mail foo@zz');
-  await waitFor(() => assert.equal(getFiles.mock.calls.length, 2));
-  assert.deepEqual(shownNames(), []);
-
-  act(() => {
-    result.current.handleFileMentionsKeyDown(keyEvent('Escape'));
-  });
-
-  // The refetch brings a matching file.
-  await act(async () => {
-    refetch.resolve(['a.txt', 'zz-new.txt']);
-    await new Promise((resolveTimeout) => setTimeout(resolveTimeout, 0));
-  });
-
-  assert.equal(result.current.showFileDropdown, false);
-  let enterHandled = true;
-  act(() => {
-    enterHandled = result.current.handleFileMentionsKeyDown(keyEvent('Enter'));
-  });
-  assert.equal(enterHandled, false);
 });

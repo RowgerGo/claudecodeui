@@ -5,8 +5,10 @@ type UseExpandedDirectoriesResult = {
   toggleDirectory: (path: string) => void;
   expandDirectories: (paths: string[]) => void;
   collapseAll: () => void;
+  forgetDirectory: (path: string) => void;
 };
 
+/** Used by FileTree to remember expanded rows during browsing and path reveals. */
 export function useExpandedDirectories(): UseExpandedDirectoriesResult {
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set());
 
@@ -40,8 +42,15 @@ export function useExpandedDirectories(): UseExpandedDirectoriesResult {
     setExpandedDirs(new Set());
   }, []);
 
+  const forgetDirectory = useCallback((path: string) => {
+    setExpandedDirs((previous) => new Set([...previous].filter((entry) => (
+      entry !== path && !entry.startsWith(path + '/') && !entry.startsWith(path + '\\')
+    ))));
+  }, []);
+
   return {
     expandedDirs,
+    forgetDirectory,
     toggleDirectory,
     expandDirectories,
     collapseAll,

@@ -115,6 +115,8 @@
     "projectFiles": "Soubory projektu"
   },
   "fileTree": {
+    "loadMore": "Načíst další",
+    "refineSearch": "Existují další shody. Upřesněte název nebo cestu.",
     "loading": "Načítání souborů...",
     "files": "Soubory",
     "simpleView": "Jednoduché zobrazení",

@@ -102,6 +102,8 @@
     "renameSessionLabel": "Oturum başlığı"
   },
   "fileTree": {
+    "loadMore": "Daha fazla yükle",
+    "refineSearch": "Daha fazla eşleşme var. Daha belirgin bir ad veya yol arayın.",
     "loading": "Dosyalar yükleniyor...",
     "files": "Dosyalar",
     "simpleView": "Basit görünüm",

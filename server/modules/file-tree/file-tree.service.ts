@@ -2,7 +2,10 @@ import path from 'node:path';
 
 import ignore from 'ignore';
 
+import { createFolderArchive } from '@/modules/file-tree/file-tree-archive.service.js';
+import { readDirectoryPage } from '@/modules/file-tree/file-tree-directory-page.js';
 import type {
+  FileTreeDirectoryContext,
   FileTreeDirectoryEntry,
   FileTreeNode,
   FileTreeServiceDependencies,
@@ -42,8 +45,9 @@ const COMMON_WORKSPACE_DIRECTORY_NAMES = [
 // broad workspace (for example, a user's home directory) cannot exhaust the
 // server heap before the browser has a chance to switch to a narrower project.
 const MAXIMUM_FILE_TREE_ENTRIES = 10_000;
+const IGNORE_CACHE_BATCH_SIZE = 4096;
 
-type FileTreeEntryFilter = (entryPath: string, isDirectory: boolean) => boolean;
+type FileTreeEntryFilter = FileTreeDirectoryContext['includeEntry'];
 
 function includeEntryByHardExclusions(entryPath: string, isDirectory: boolean): boolean {
   return !isDirectory || !HARD_EXCLUDED_DIRECTORY_NAMES.has(path.basename(entryPath));
@@ -161,14 +165,23 @@ function createGitignoreEntryFilter(
   projectRoot: string,
   gitignoreContent: string,
 ): FileTreeEntryFilter {
-  const gitignore = ignore().add(gitignoreContent);
+  const rules = ignore().add(gitignoreContent);
+  let matcher = ignore().add(rules);
+  let testedPaths = 0;
 
   return (entryPath, isDirectory) => {
     if (!includeEntryByHardExclusions(entryPath, isDirectory)) return false;
 
     const relativePath = path.relative(projectRoot, entryPath).split(path.sep).join('/');
     const matchPath = isDirectory ? `${relativePath}/` : relativePath;
-    return !gitignore.ignores(matchPath);
+    // ignore caches every path it checks. Retain compiled rules across batches
+    // without retaining every filename in a large directory or project search.
+    if (testedPaths === IGNORE_CACHE_BATCH_SIZE) {
+      matcher = ignore().add(rules);
+      testedPaths = 0;
+    }
+    testedPaths++;
+    return !matcher.ignores(matchPath);
   };
 }
 
@@ -191,6 +204,88 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       throw createFileTreeError('Project not found', 404, 'PROJECT_NOT_FOUND');
     }
     return projectRoot;
+  }
+
+  async function projectEntryFilter(projectRoot: string, canonicalRoot?: string): Promise<FileTreeEntryFilter> {
+    const ignorePath = path.join(projectRoot, '.gitignore');
+    try {
+      if (canonicalRoot) {
+        const target = path.relative(canonicalRoot, await fileSystem.realpath(ignorePath));
+        if (target === '..' || target.startsWith(`..${path.sep}`) || path.isAbsolute(target)) {
+          return includeEntryByFallbackDirectoryNames;
+        }
+      }
+      return createGitignoreEntryFilter(projectRoot, await fileSystem.readTextFile(ignorePath));
+    } catch (error) {
+      if (readErrorCode(error) !== 'ENOENT') {
+        dependencies.logger.error(`Error reading .gitignore in "${projectRoot}"`, error);
+      }
+      return includeEntryByFallbackDirectoryNames;
+    }
+  }
+
+  function mapDirectoryError(error: unknown): never {
+    return mapFileSystemError(error, {
+      ENOENT: { message: 'Directory not found', statusCode: 404 },
+      ENOTDIR: { message: 'Path is not a directory', statusCode: 400 },
+      EACCES: { message: 'Permission denied', statusCode: 403 },
+      EPERM: { message: 'Permission denied', statusCode: 403 },
+      ELOOP: { message: 'Cannot browse a symbolic link', statusCode: 403 },
+    });
+  }
+
+  async function projectDirectoryContext(projectId: string, requestedPath: string): Promise<FileTreeDirectoryContext> {
+    const projectRoot = path.resolve(await resolveProjectRoot(projectId));
+    const directoryPath = path.resolve(projectRoot, requestedPath);
+    const relative = path.relative(projectRoot, directoryPath);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw createFileTreeError('Path must be under project root', 403, 'PATH_OUTSIDE_PROJECT');
+    }
+
+    try {
+      const canonicalRoot = await fileSystem.realpath(projectRoot);
+      const filter = await projectEntryFilter(projectRoot, canonicalRoot);
+      const includeEntry: FileTreeEntryFilter = (entryPath, isDirectory) =>
+        filter(entryPath, isDirectory)
+        && (!isDirectory || !FORBIDDEN_WORKSPACE_PATHS.includes(normalizeProjectPath(entryPath)));
+
+      // Validate direct requests the same way as an interactive walk, including
+      // ancestors excluded by name and directory symlinks (even inside the root).
+      let ancestor = projectRoot;
+      for (const segment of relative.split(path.sep).filter(Boolean)) {
+        ancestor = path.join(ancestor, segment);
+        if (!includeEntry(ancestor, true)) {
+          throw createFileTreeError('Directory is excluded from this project', 403, 'DIRECTORY_EXCLUDED');
+        }
+      }
+      const expectedDirectory = path.join(canonicalRoot, relative);
+      if (relative && path.relative(expectedDirectory, await fileSystem.realpath(directoryPath))) {
+        throw createFileTreeError('Cannot browse a symbolic link', 403, 'DIRECTORY_SYMLINK');
+      }
+      if (!(await fileSystem.stat(expectedDirectory)).isDirectory()) {
+        throw createFileTreeError('Path is not a directory', 400, 'ENOTDIR');
+      }
+      return { projectRoot, directoryPath, canonicalRoot, includeEntry };
+    } catch (error) {
+      return mapDirectoryError(error);
+    }
+  }
+
+  async function* visibleDirectoryEntries(
+    directoryPath: string,
+    includeEntry: FileTreeEntryFilter,
+    signal?: AbortSignal,
+  ): AsyncGenerator<FileTreeDirectoryEntry> {
+    await acquire();
+    try {
+      signal?.throwIfAborted();
+      for await (const entry of fileSystem.openDirectory(directoryPath)) {
+        signal?.throwIfAborted();
+        if (includeEntry(path.join(directoryPath, entry.name), entry.isDirectory())) yield entry;
+      }
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -245,6 +340,44 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     return visibleEntries;
   }
 
+  async function readFileTreeNode(directoryPath: string, entry: FileTreeDirectoryEntry): Promise<FileTreeNode> {
+    const itemPath = path.join(directoryPath, entry.name);
+    const item: FileTreeNode = {
+      name: entry.name,
+      path: itemPath,
+      type: entry.isDirectory() ? 'directory' : 'file',
+      size: 0,
+      modified: null,
+      permissions: '000',
+      permissionsRwx: '---------',
+    };
+
+    try {
+      await acquire();
+      try {
+        const stats = await fileSystem.lstat(itemPath);
+        const ownerPermissions = (stats.mode >> 6) & 7;
+        const groupPermissions = (stats.mode >> 3) & 7;
+        const otherPermissions = stats.mode & 7;
+
+        item.size = stats.size;
+        item.modified = stats.mtime.toISOString();
+        item.permissions = `${ownerPermissions}${groupPermissions}${otherPermissions}`;
+        item.permissionsRwx = permissionBitsToRwx(ownerPermissions)
+          + permissionBitsToRwx(groupPermissions)
+          + permissionBitsToRwx(otherPermissions);
+        if (stats.isSymbolicLink()) {
+          item.isSymlink = true;
+        }
+      } finally {
+        release();
+      }
+    } catch {
+      // Metadata failures should not hide an otherwise readable tree entry.
+    }
+    return item;
+  }
+
   async function buildFileTree(
     directoryPath: string,
     maximumDepth: number,
@@ -255,40 +388,8 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
     const visibleEntries = await collectVisibleEntries(directoryPath, includeEntry, remainingEntries);
 
     const items = await Promise.all(visibleEntries.map(async (entry): Promise<FileTreeNode> => {
-      const itemPath = path.join(directoryPath, entry.name);
-      const item: FileTreeNode = {
-        name: entry.name,
-        path: itemPath,
-        type: entry.isDirectory() ? 'directory' : 'file',
-        size: 0,
-        modified: null,
-        permissions: '000',
-        permissionsRwx: '---------',
-      };
-
-      try {
-        await acquire();
-        try {
-          const stats = await fileSystem.lstat(itemPath);
-          const ownerPermissions = (stats.mode >> 6) & 7;
-          const groupPermissions = (stats.mode >> 3) & 7;
-          const otherPermissions = stats.mode & 7;
-
-          item.size = stats.size;
-          item.modified = stats.mtime.toISOString();
-          item.permissions = `${ownerPermissions}${groupPermissions}${otherPermissions}`;
-          item.permissionsRwx = permissionBitsToRwx(ownerPermissions)
-            + permissionBitsToRwx(groupPermissions)
-            + permissionBitsToRwx(otherPermissions);
-          if (stats.isSymbolicLink()) {
-            item.isSymlink = true;
-          }
-        } finally {
-          release();
-        }
-      } catch {
-        // Metadata failures should not hide an otherwise readable tree entry.
-      }
+      const item = await readFileTreeNode(directoryPath, entry);
+      const itemPath = item.path;
 
       // Skip recursing into pseudo-filesystems and other system-critical
       // directories (e.g. /proc, /sys) — they're never valid project roots,
@@ -477,6 +578,11 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       }
     },
 
+    async openFolderArchive(projectId, folderPath, signal) {
+      const directory = await projectDirectoryContext(projectId, folderPath);
+      return createFolderArchive(fileSystem, directory, signal);
+    },
+
     async openFile(projectId, filePath) {
       const projectRoot = await resolveProjectRoot(projectId);
       const resolvedPath = await resolveReadablePath(projectRoot, filePath);
@@ -507,6 +613,77 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       return { success: true, path: resolvedPath, message: 'File saved successfully' };
     },
 
+    async listProjectDirectory(projectId, { path: requestedPath, cursor, childName, signal }) {
+      signal?.throwIfAborted();
+      const { directoryPath, includeEntry } = await projectDirectoryContext(projectId, requestedPath);
+      try {
+        const page = await readDirectoryPage(visibleDirectoryEntries(directoryPath, includeEntry, signal), cursor, childName);
+        signal?.throwIfAborted();
+        const entries = await Promise.all(page.entries.map((entry) => readFileTreeNode(directoryPath, entry)));
+        const matchedEntry = page.matchedEntry
+          ? entries.find((entry) => entry.name === childName) ?? await readFileTreeNode(directoryPath, page.matchedEntry)
+          : undefined;
+        return { entries, nextCursor: page.nextCursor, matchedEntry };
+      } catch (error) {
+        return mapDirectoryError(error);
+      }
+    },
+
+    async searchProjectFiles(projectId, { query, limit, filesOnly, match, signal }) {
+      signal?.throwIfAborted();
+      const { projectRoot, canonicalRoot, includeEntry } = await projectDirectoryContext(projectId, '');
+      const directories = [projectRoot];
+      const matches: Array<{ directoryPath: string; entry: FileTreeDirectoryEntry; relativePath: string }> = [];
+      const needle = match === 'suffix' ? query : query.toLowerCase();
+      let truncated = false;
+      // Only queue directories. Nonmatching files never need a stat, and one
+      // extra match is enough to report truncation and close the stream.
+      while (directories.length && !truncated) {
+        signal?.throwIfAborted();
+        const directoryPath = directories.pop()!;
+        try {
+          const relativeDirectory = path.relative(projectRoot, directoryPath);
+          if (relativeDirectory && path.relative(
+            path.join(canonicalRoot, relativeDirectory), await fileSystem.realpath(directoryPath),
+          )) continue;
+          let exactAncestor: string | undefined;
+          for await (const entry of visibleDirectoryEntries(directoryPath, includeEntry, signal)) {
+            const entryPath = path.join(directoryPath, entry.name);
+            const relativePath = path.relative(projectRoot, entryPath).split(path.sep).join('/');
+            if (entry.isDirectory()) {
+              // Follow an exact project-relative reference first. Otherwise a
+              // nested copy of src/file.ts can win when the caller asks for one hit.
+              if (match === 'suffix' && needle.startsWith(`${relativePath}/`)) exactAncestor = entryPath;
+              else directories.push(entryPath);
+              if (filesOnly) continue;
+            }
+            const matchesQuery = match === 'suffix'
+              ? relativePath === needle || relativePath.endsWith(`/${needle}`)
+              : relativePath.toLowerCase().includes(needle);
+            if (matchesQuery) {
+              if (matches.length >= limit) {
+                truncated = true;
+                break;
+              }
+              matches.push({ directoryPath, entry, relativePath });
+            }
+          }
+          if (exactAncestor) directories.push(exactAncestor);
+        } catch (error) {
+          // An unreadable or concurrently removed branch must not hide
+          // matches in its siblings. Errors on the project root surface.
+          const code = readErrorCode(error);
+          if (directoryPath !== projectRoot && code && ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'ELOOP'].includes(code)) continue;
+          return mapDirectoryError(error);
+        }
+      }
+      signal?.throwIfAborted();
+      const entries = await Promise.all(matches.map(async ({ directoryPath, entry, relativePath }) => ({
+        ...await readFileTreeNode(directoryPath, entry), relativePath,
+      })));
+      return { entries, truncated };
+    },
+
     async listProjectFiles(projectId, options) {
       const projectRoot = await resolveProjectRoot(projectId);
       try {
@@ -515,18 +692,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
         throw createFileTreeError(`Project path not found: ${projectRoot}`, 404, 'PROJECT_PATH_NOT_FOUND');
       }
 
-      let includeEntry: FileTreeEntryFilter | undefined;
-      if (options?.respectGitignore) {
-        try {
-          const gitignoreContent = await fileSystem.readTextFile(path.join(projectRoot, '.gitignore'));
-          includeEntry = createGitignoreEntryFilter(projectRoot, gitignoreContent);
-        } catch (error) {
-          if (readErrorCode(error) !== 'ENOENT') {
-            dependencies.logger.error(`Error reading .gitignore in "${projectRoot}"`, error);
-          }
-        }
-      }
-
+      const includeEntry = options?.respectGitignore ? await projectEntryFilter(projectRoot) : undefined;
       return buildFileTree(projectRoot, 10, 0, includeEntry);
     },
 

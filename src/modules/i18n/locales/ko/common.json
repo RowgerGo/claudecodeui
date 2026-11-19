@@ -100,6 +100,8 @@
     "projectFiles": "프로젝트 파일"
   },
   "fileTree": {
+    "loadMore": "더 불러오기",
+    "refineSearch": "검색 결과가 더 있습니다. 이름이나 경로를 더 구체적으로 입력하세요.",
     "loading": "파일 로딩 중...",
     "files": "파일",
     "simpleView": "간단히 보기",

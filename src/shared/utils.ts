@@ -25,6 +25,18 @@ export function cn(...inputs: ClassValue[]) {
 
 // ---------------------------
 
+//----------------- PROJECT FILE PATHS ------------
+
+/** Finds a tree entry's containing directory using the server's path separators, preserving filesystem roots. */
+export function getParentDirectoryPath(path: string): string {
+  const separator = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  if (separator < 0) return '';
+  if (separator === 0 || (separator === 2 && /^[a-z]:/i.test(path))) return path.slice(0, separator + 1);
+  return path.slice(0, separator);
+}
+
+// ---------------------------
+
 //----------------- CLIPBOARD ------------
 
 /**

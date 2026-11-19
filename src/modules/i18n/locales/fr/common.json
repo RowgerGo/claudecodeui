@@ -100,6 +100,8 @@
     "projectFiles": "Fichiers du projet"
   },
   "fileTree": {
+    "loadMore": "Charger la suite",
+    "refineSearch": "D’autres résultats sont disponibles. Précisez le nom ou le chemin recherché.",
     "loading": "Chargement des fichiers...",
     "files": "Fichiers",
     "simpleView": "Vue simple",

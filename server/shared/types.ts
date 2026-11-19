@@ -1676,6 +1676,8 @@ export type FileTreeFileSystem = {
   unlink(filePath: string): Promise<void>;
   copyFile(sourcePath: string, destinationPath: string): Promise<void>;
   createReadStream(filePath: string): Readable;
+  /** Opens a verified regular file at its canonical path without following links for ZIP exports. */
+  openArchiveFile(canonicalPath: string): Promise<Readable>;
 };
 
 /**
@@ -1747,6 +1749,18 @@ export type FileTreeServiceDependencies = {
 };
 
 /**
+ * Validated directory and visibility policy shared by file browsing, search, and ZIP export.
+ * Paths accepted by includeEntry are absolute paths under the configured projectRoot.
+ * canonicalRoot identifies that root on disk even when the project itself is a symlink.
+ */
+export type FileTreeDirectoryContext = {
+  projectRoot: string;
+  canonicalRoot: string;
+  directoryPath: string;
+  includeEntry: (absolutePath: string, isDirectory: boolean) => boolean;
+};
+
+/**
  * Complete File Tree application-service surface consumed by HTTP routes.
  *
  * Routes parse transport inputs and call these methods; they never resolve
@@ -1760,6 +1774,8 @@ export type FileTreeServices = {
   }>;
   createWorkspaceFolder(folderPath: string): Promise<{ success: true; path: string }>;
   readTextFile(projectId: string, filePath: string): Promise<{ content: string; path: string }>;
+  /** Streams the visible descendants of a selected project directory until completion or cancellation. */
+  openFolderArchive(projectId: string, folderPath: string, signal: AbortSignal): Promise<{ filename: string; stream: Readable }>;
   openFile(projectId: string, filePath: string): Promise<{ contentType: string; stream: Readable }>;
   saveTextFile(projectId: string, filePath: string, content: string): Promise<{
     success: true;
@@ -1770,6 +1786,21 @@ export type FileTreeServices = {
     projectId: string,
     options?: { respectGitignore: boolean },
   ): Promise<FileTreeNode[]>;
+  /** Lists one page of direct children. A requested child can also be revealed outside the page. */
+  listProjectDirectory(projectId: string, options: {
+    path: string;
+    cursor?: string;
+    childName?: string;
+    signal?: AbortSignal;
+  }): Promise<{ entries: FileTreeNode[]; nextCursor: string | null; matchedEntry?: FileTreeNode }>;
+  /** Searches visible project-relative paths, independently of directory expansion in the browser. */
+  searchProjectFiles(projectId: string, options: {
+    query: string;
+    limit: number;
+    filesOnly: boolean;
+    match?: 'suffix';
+    signal?: AbortSignal;
+  }): Promise<{ entries: Array<FileTreeNode & { relativePath: string }>; truncated: boolean }>;
   createEntry(input: {
     projectId: string;
     parentPath: string;

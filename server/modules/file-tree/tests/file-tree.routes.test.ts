@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
+import { Readable } from 'node:stream';
 import test from 'node:test';
 
 import express, { type RequestHandler } from 'express';
@@ -17,9 +18,12 @@ function createFakeServices(overrides: Partial<FileTreeServices> = {}): FileTree
     browseWorkspace: unexpectedOperation,
     createWorkspaceFolder: unexpectedOperation,
     readTextFile: unexpectedOperation,
+    openFolderArchive: unexpectedOperation,
     openFile: unexpectedOperation,
     saveTextFile: unexpectedOperation,
     listProjectFiles: unexpectedOperation,
+    listProjectDirectory: unexpectedOperation,
+    searchProjectFiles: unexpectedOperation,
     createEntry: unexpectedOperation,
     renameEntry: unexpectedOperation,
     deleteEntry: unexpectedOperation,
@@ -93,6 +97,77 @@ test('project files route requests gitignore filtering when explicitly enabled',
   });
 
   assert.deepEqual(inputs, [['project-1', { respectGitignore: true }]]);
+});
+
+test('directory and search routes parse queries and propagate cancellation signals', async () => {
+  const services = createFakeServices({
+    listProjectDirectory: async (id, options) => {
+      assert.equal(id, 'project-1');
+      assert.equal(options.path, 'many entries');
+      assert.equal(options.cursor, '1file');
+      assert.equal(options.childName, 'last.ts');
+      assert.ok(options.signal instanceof AbortSignal);
+      return { entries: [], nextCursor: null };
+    },
+    searchProjectFiles: async (id, options) => {
+      assert.equal(id, 'project-1');
+      assert.equal(options.query, 'src/util.ts');
+      assert.equal(options.match, 'suffix');
+      assert.equal(options.limit, 12);
+      assert.equal(options.filesOnly, true);
+      assert.ok(options.signal instanceof AbortSignal);
+      return { entries: [], truncated: false };
+    },
+  });
+  await withFileTreeServer(services, async (baseUrl) => {
+    const base = `${baseUrl}/api/file-tree/projects/project-1`;
+    const directory = await fetch(`${base}/directory?path=many%20entries&cursor=1file&childName=last.ts`);
+    assert.deepEqual(await directory.json(), { entries: [], nextCursor: null });
+    const search = await fetch(`${base}/search?q=src%2Futil.ts&match=suffix&limit=12&filesOnly=true`);
+    assert.deepEqual(await search.json(), { entries: [], truncated: false });
+    assert.equal((await fetch(`${base}/search?limit=501`)).status, 400);
+    assert.equal((await fetch(`${base}/search?match=unknown`)).status, 400);
+    assert.equal((await fetch(`${base}/directory?path=a&path=b`)).status, 400);
+  });
+});
+
+test('archive route serves an attachment and validates its folder path', async () => {
+  const bytes = Buffer.from([0x50, 0x4b, 0, 255]);
+  const services = createFakeServices({
+    openFolderArchive: async (projectId, folderPath, signal) => {
+      assert.equal(projectId, 'project-1');
+      assert.equal(folderPath, 'nested/directory');
+      assert.equal(signal.aborted, false);
+      return { filename: 'directory.zip', stream: Readable.from([bytes]) };
+    },
+  });
+  await withFileTreeServer(services, async (url) => {
+    const endpoint = `${url}/api/file-tree/projects/project-1/archive`;
+    assert.equal((await fetch(endpoint)).status, 400);
+    const response = await fetch(`${endpoint}?path=nested%2Fdirectory`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'application/zip');
+    assert.match(response.headers.get('content-disposition') ?? '', /attachment; filename="directory.zip"/);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+  });
+});
+
+test('a failed archive stream terminates its HTTP download', async () => {
+  const services = createFakeServices({
+    openFolderArchive: async () => ({
+      filename: 'incomplete.zip',
+      stream: Readable.from((async function* () {
+        yield Buffer.from('partial zip');
+        throw new Error('File became unreadable');
+      })()),
+    }),
+  });
+  await withFileTreeServer(services, async (url) => {
+    await assert.rejects(async () => {
+      const response = await fetch(`${url}/api/file-tree/projects/project-1/archive?path=folder`);
+      await response.arrayBuffer();
+    });
+  });
 });
 
 test('create route parses the transport payload before invoking the service', async () => {

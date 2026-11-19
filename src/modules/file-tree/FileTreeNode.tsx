@@ -2,7 +2,7 @@ import type { DragEvent, ReactNode, RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronRight, Folder, FolderOpen, Upload } from 'lucide-react';
 
-import { cn } from '@/shared/utils';
+import { cn, getParentDirectoryPath } from '@/shared/utils';
 import type { FileTreeNode as FileTreeNodeType, FileTreeViewMode } from '@/shared/types';
 import { Input } from '@/shared/ui';
 import FileContextMenu from '@/modules/file-tree/FileContextMenu';
@@ -13,6 +13,10 @@ type FileTreeNodeProps = {
   viewMode: FileTreeViewMode;
   expandedDirs: Set<string>;
   onItemClick: (item: FileTreeNodeType) => void;
+  getEntries: (path: string) => FileTreeNodeType[];
+  renderDirectoryStatus: (path: string, level: number) => ReactNode;
+  revealedPath: string | null;
+  searchResults: boolean;
   renderFileIcon: (filename: string) => ReactNode;
   formatFileSize: (bytes?: number) => string;
   formatRelativeTime: (date?: string) => string;
@@ -43,13 +47,6 @@ type TreeItemIconProps = {
   renderFileIcon: (filename: string) => ReactNode;
 };
 
-// A file dropped onto a file row should land next to it, in its parent folder.
-function getParentDirectoryPath(itemPath: string) {
-  const segments = itemPath.split(/[\\/]/);
-  segments.pop();
-  return segments.join('/');
-}
-
 function TreeItemIcon({ item, isOpen, renderFileIcon }: TreeItemIconProps) {
   if (item.type === 'directory') {
     return (
@@ -73,37 +70,42 @@ function TreeItemIcon({ item, isOpen, renderFileIcon }: TreeItemIconProps) {
 }
 
 /** Rendered by FileTreeList for each file or directory row, including its context menu and inline rename input. */
-export default function FileTreeNode({
-  item,
-  level,
-  viewMode,
-  expandedDirs,
-  onItemClick,
-  renderFileIcon,
-  formatFileSize,
-  formatRelativeTime,
-  onRename,
-  onDelete,
-  onNewFile,
-  onNewFolder,
-  onCopyPath,
-  onDownload,
-  onUpload,
-  onRefresh,
-  dropTarget,
-  onItemDragOver,
-  renamingItem,
-  renameValue,
-  setRenameValue,
-  handleConfirmRename,
-  handleCancelRename,
-  renameInputRef,
-  operationLoading,
-}: FileTreeNodeProps) {
+export default function FileTreeNode(props: FileTreeNodeProps) {
+  const {
+    item,
+    level,
+    viewMode,
+    expandedDirs,
+    onItemClick,
+    renderFileIcon,
+    formatFileSize,
+    formatRelativeTime,
+    onRename,
+    onDelete,
+    onNewFile,
+    onNewFolder,
+    onCopyPath,
+    onDownload,
+    onUpload,
+    onRefresh,
+    dropTarget,
+    onItemDragOver,
+    renamingItem,
+    renameValue,
+    setRenameValue,
+    handleConfirmRename,
+    handleCancelRename,
+    renameInputRef,
+    operationLoading,
+    getEntries,
+    renderDirectoryStatus,
+    revealedPath,
+    searchResults,
+  } = props;
   const { t } = useTranslation();
   const isDirectory = item.type === 'directory';
-  const isOpen = isDirectory && expandedDirs.has(item.path);
-  const hasChildren = Boolean(isDirectory && item.children && item.children.length > 0);
+  const isOpen = isDirectory && !searchResults && expandedDirs.has(item.path);
+  const label = searchResults && typeof item.relativePath === 'string' ? item.relativePath : item.name;
   const isRenaming = renamingItem?.path === item.path;
   const dragTargetPath = isDirectory ? item.path : getParentDirectoryPath(item.path);
   const isDropTarget = isDirectory && dropTarget === item.path;
@@ -123,6 +125,7 @@ export default function FileTreeNode({
     isDirectory && isOpen && 'border-l-2 border-primary/30',
     (isDirectory && !isOpen) || !isDirectory ? 'border-l-2 border-transparent' : '',
     'relative',
+    revealedPath === item.path && !searchResults && 'bg-accent',
     isDropTarget && 'bg-blue-500/10 ring-1 ring-inset ring-blue-500/40',
   );
 
@@ -179,6 +182,17 @@ export default function FileTreeNode({
   const rowContent = (
     <div
       className={rowClassName}
+      data-file-tree-path={item.path}
+      title={label}
+      role="button"
+      tabIndex={0}
+      aria-expanded={isDirectory && !searchResults ? isOpen : undefined}
+      onKeyDown={(event) => {
+        if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          onItemClick(item);
+        }
+      }}
       style={{ paddingLeft: `${level * 16 + 4}px` }}
       onClick={() => onItemClick(item)}
       onDragOver={onItemDragOver ? (event) => onItemDragOver(event, dragTargetPath) : undefined}
@@ -187,7 +201,7 @@ export default function FileTreeNode({
         <>
           <div className="col-span-5 flex min-w-0 items-center gap-1.5">
             <TreeItemIcon item={item} isOpen={isOpen} renderFileIcon={renderFileIcon} />
-            <span className={nameClassName}>{item.name}</span>
+            <span className={nameClassName}>{label}</span>
           </div>
           <div className="col-span-2 text-sm tabular-nums text-muted-foreground">
             {item.type === 'file' ? formatFileSize(item.size) : ''}
@@ -199,7 +213,7 @@ export default function FileTreeNode({
         <>
           <div className="flex min-w-0 items-center gap-1.5">
             <TreeItemIcon item={item} isOpen={isOpen} renderFileIcon={renderFileIcon} />
-            <span className={nameClassName}>{item.name}</span>
+            <span className={nameClassName}>{label}</span>
           </div>
           <div className="ml-2 flex flex-shrink-0 items-center gap-3 text-sm text-muted-foreground">
             {item.type === 'file' && (
@@ -213,7 +227,7 @@ export default function FileTreeNode({
       ) : (
         <>
           <TreeItemIcon item={item} isOpen={isOpen} renderFileIcon={renderFileIcon} />
-          <span className={nameClassName}>{item.name}</span>
+          <span className={nameClassName}>{label}</span>
         </>
       )}
       {uploadHoverButton}
@@ -243,43 +257,17 @@ export default function FileTreeNode({
         rowContent
       )}
 
-      {isDirectory && isOpen && hasChildren && (
+      {isOpen && (
         <div className="relative">
           <span
             className="absolute bottom-0 top-0 border-l border-border/40"
             style={{ left: `${level * 16 + 14}px` }}
             aria-hidden="true"
           />
-          {item.children?.map((child) => (
-            <FileTreeNode
-              key={child.path}
-              item={child}
-              level={level + 1}
-              viewMode={viewMode}
-              expandedDirs={expandedDirs}
-              onItemClick={onItemClick}
-              renderFileIcon={renderFileIcon}
-              formatFileSize={formatFileSize}
-              formatRelativeTime={formatRelativeTime}
-              onRename={onRename}
-              onDelete={onDelete}
-              onNewFile={onNewFile}
-              onNewFolder={onNewFolder}
-              onCopyPath={onCopyPath}
-              onDownload={onDownload}
-              onUpload={onUpload}
-              onRefresh={onRefresh}
-              dropTarget={dropTarget}
-              onItemDragOver={onItemDragOver}
-              renamingItem={renamingItem}
-              renameValue={renameValue}
-              setRenameValue={setRenameValue}
-              handleConfirmRename={handleConfirmRename}
-              handleCancelRename={handleCancelRename}
-              renameInputRef={renameInputRef}
-              operationLoading={operationLoading}
-            />
+          {getEntries(item.path).map((child) => (
+            <FileTreeNode {...props} key={child.path} item={child} level={level + 1} />
           ))}
+          {renderDirectoryStatus(item.path, level + 1)}
         </div>
       )}
     </div>
