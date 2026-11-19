@@ -284,6 +284,22 @@ test('a superseded first load never renders the sidebar as empty', async () => {
   );
 });
 
+test('a workspace without saved preferences opens the files tab', async () => {
+  respondWith([buildProject()]);
+  const { result } = await renderProjectsState();
+  await waitFor(() => assert.ok(result.current.selectedProject));
+  assert.equal(result.current.activeTab, 'files');
+});
+
+test('a saved chat tab keeps the workspace closed even without a remembered tool', async () => {
+  localStorage.setItem('activeTab', 'chat');
+  respondWith([buildProject()]);
+  const { result } = await renderProjectsState();
+  await waitFor(() => assert.ok(result.current.selectedProject));
+  assert.equal(result.current.activeTab, 'chat');
+  assert.equal(result.current.lastTool, 'files');
+});
+
 test('a saved tool tab opens beside the chat and reopening the workspace remembers the last closed tool', async () => {
   respondWith([]);
   localStorage.setItem('activeTab', 'git');

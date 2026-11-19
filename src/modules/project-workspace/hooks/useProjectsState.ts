@@ -404,10 +404,13 @@ function readWorkspaceTools(): WorkspaceToolsState {
     if (tool && isValidTab(tool) && tool !== 'chat') {
       return { open: false, lastTool: tool };
     }
+    if (tab === 'chat') {
+      return { open: false, lastTool: 'files' };
+    }
   } catch {
     // localStorage unavailable
   }
-  return { open: false, lastTool: 'files' };
+  return { open: true, lastTool: 'files' };
 }
 
 export function useProjectsState({
