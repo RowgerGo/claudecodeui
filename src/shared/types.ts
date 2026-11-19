@@ -2,6 +2,36 @@ import type { TFunction } from 'i18next';
 import type { CSSProperties } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
+//----------------- CODEX ACCOUNT LIMITS ------------
+
+/** An individual free reset returned by Codex. Null expiry means unlimited validity, omitted expiry is unknown. */
+export type CodexResetCredit = {
+  id: string;
+  status: string;
+  expiresAt?: string | null;
+  title: string | null;
+  description: string | null;
+};
+
+/** The account snapshot used by the weekly summary and the full plan limits dialog. */
+export type CodexRateLimits = {
+  limits: {
+    id: string;
+    name: string | null;
+    planType: string | null;
+    windows: {
+      kind: 'primary' | 'secondary';
+      usedPercent: number;
+      windowDurationMins: number;
+      resetsAt: string | null;
+    }[];
+  }[];
+  resetCreditsAvailable: number;
+  resetCredits: CodexResetCredit[] | null;
+};
+
+// ---------------------------
+
 //----------------- LLM PROVIDER MODEL CATALOG ------------
 
 /** Identifies which coding-agent CLI backs a session, project selection or model list. */

@@ -260,6 +260,15 @@ async function withAppServer<T>(
 
 /** Used by the Codex providers and their tests to speak to the bundled CLI. */
 export const codexAppServer = {
+  /** The usage service reads the current login's limits or redeems one explicitly selected credit. */
+  accountRequest(
+    method: 'account/rateLimits/read' | 'account/rateLimitResetCredit/consume',
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    // A short-lived connection picks up account changes between requests.
+    return withAppServer(({ call }) => call(method, params));
+  },
+
   /** Used by the main chat runtime to own the transport for one thread. */
   withChatConnection<T>(run: Parameters<typeof withAppServer<T>>[0], signal: AbortSignal): Promise<T> {
     // Main chat historically used exec's non-interactive permissions. Keep

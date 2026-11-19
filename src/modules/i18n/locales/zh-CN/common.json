@@ -17,6 +17,36 @@
     "upload": "上传",
     "browse": "浏览"
   },
+  "codexUsage": {
+    "details": "Codex 额度详情",
+    "viewDetails": "详情",
+    "weekly": "{{pool}} 周额度已用 {{value}}",
+    "weeklyLabel": "Codex 周额度",
+    "used": "已用 {{value}}",
+    "resetsAt": "{{time}} 重置",
+    "unknownReset": "重置时间未知",
+    "limits": "套餐额度",
+    "noLimits": "Codex 未返回套餐额度。",
+    "freeResets": "免费重置",
+    "available": "可用 {{count}} 次",
+    "missingCredits": "部分免费重置券的详情暂不可用。",
+    "credit": "免费重置券 {{number}}",
+    "expiresAt": "{{time}} 到期",
+    "noExpiry": "长期有效",
+    "unknownExpiry": "有效期未知",
+    "unavailable": "暂不可用",
+    "useReset": "使用重置券…",
+    "confirm": "使用「{{name}}」重置符合条件的 Codex 额度？这将消耗一次免费重置机会。\n\n{{expiry}}",
+    "applying": "正在使用重置券…",
+    "readError": "无法读取 Codex 额度。",
+    "outcomes": {
+      "reset": "已使用免费重置券重置额度。",
+      "alreadyRedeemed": "这张重置券已使用。",
+      "nothingToReset": "当前没有可以重置的额度。",
+      "noCredit": "这张免费重置券已失效。",
+      "unknown": "无法确认重置结果，请先查看更新后的额度再重试。"
+    }
+  },
   "toolPanel": {
     "name": "工作区工具",
     "close": "收起工具面板",

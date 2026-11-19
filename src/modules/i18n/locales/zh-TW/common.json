@@ -17,6 +17,36 @@
     "upload": "上傳",
     "browse": "瀏覽"
   },
+  "codexUsage": {
+    "details": "Codex 額度詳情",
+    "viewDetails": "詳情",
+    "weekly": "{{pool}} 週額度已用 {{value}}",
+    "weeklyLabel": "Codex 週額度",
+    "used": "已用 {{value}}",
+    "resetsAt": "{{time}} 重設",
+    "unknownReset": "重設時間未知",
+    "limits": "方案額度",
+    "noLimits": "Codex 未傳回方案額度。",
+    "freeResets": "免費重設",
+    "available": "可用 {{count}} 次",
+    "missingCredits": "部分免費重設券的詳情暫時無法取得。",
+    "credit": "免費重設券 {{number}}",
+    "expiresAt": "{{time}} 到期",
+    "noExpiry": "永久有效",
+    "unknownExpiry": "有效期限未知",
+    "unavailable": "暫時無法使用",
+    "useReset": "使用重設券…",
+    "confirm": "使用「{{name}}」重設符合條件的 Codex 額度？這將消耗一次免費重設機會。\n\n{{expiry}}",
+    "applying": "正在使用重設券…",
+    "readError": "無法讀取 Codex 額度。",
+    "outcomes": {
+      "reset": "已使用免費重設券重設額度。",
+      "alreadyRedeemed": "這張重設券已使用。",
+      "nothingToReset": "目前沒有可以重設的額度。",
+      "noCredit": "這張免費重設券已失效。",
+      "unknown": "無法確認重設結果，請先查看更新後的額度再試一次。"
+    }
+  },
   "toolPanel": {
     "name": "工作區工具",
     "close": "收合工具面板",

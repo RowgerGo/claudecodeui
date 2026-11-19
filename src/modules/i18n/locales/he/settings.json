@@ -711,12 +711,6 @@
       "description": "מעקב חי אחרי מגבלות התוכנית של Claude Code והיסטוריית טוקנים ועלויות של 30 יום.",
       "install": "התקנה"
     },
-    "codexUsagePlugin": {
-      "name": "שימוש ב-Codex",
-      "badge": "לא רשמי",
-      "description": "מעקב חי אחרי מגבלות התוכנית של Codex, זמני איפוס ופעילות טוקנים בחשבון ב-30 הימים האחרונים.",
-      "install": "התקנה"
-    },
     "glmUsagePlugin": {
       "name": "שימוש ב-GLM",
       "badge": "לא רשמי",

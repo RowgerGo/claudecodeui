@@ -2,6 +2,7 @@ import express, { type Request, type Response } from 'express';
 
 import { providerAuthService } from '@/modules/providers/services/provider-auth.service.js';
 import { claudeSettingsPermissionsService } from '@/modules/providers/services/claude-settings-permissions.service.js';
+import { codexUsageService } from '@/modules/providers/services/codex-usage.service.js';
 import { providerCapabilitiesService } from '@/modules/providers/services/provider-capabilities.service.js';
 import { providerCliService } from '@/modules/providers/services/provider-cli.service.js';
 import { providerMcpService } from '@/modules/providers/services/mcp.service.js';
@@ -636,6 +637,37 @@ const parseCustomModelsOnlyPayload = (payload: unknown): boolean => {
 
   return enabled;
 };
+
+router.get(
+  '/codex/rate-limits',
+  asyncHandler(async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
+    const includeDetails = parseOptionalBooleanQuery(req.query.details, 'details') ?? true;
+    res.json(createApiSuccessResponse(await codexUsageService.readLimits(includeDetails)));
+  }),
+);
+
+const validResetRequestId = (id: unknown): id is string =>
+  typeof id === 'string' && id.length <= 512 && id.trim().length > 0;
+
+router.post(
+  '/codex/reset-credits/consume',
+  asyncHandler(async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
+    if (!req.is('application/json')) {
+      throw new AppError('Expected an application/json request body.', {
+        code: 'UNSUPPORTED_MEDIA_TYPE', statusCode: 415,
+      });
+    }
+    const { confirmed, creditId, idempotencyKey } = req.body ?? {};
+    if (confirmed !== true || !validResetRequestId(creditId) || !validResetRequestId(idempotencyKey)) {
+      throw new AppError('A confirmed reset, credit ID and idempotency key are required.', {
+        code: 'INVALID_CODEX_RESET_REQUEST', statusCode: 400,
+      });
+    }
+    res.json(createApiSuccessResponse(await codexUsageService.consumeCredit(creditId, idempotencyKey)));
+  }),
+);
 
 router.get(
   '/:provider/auth/status',

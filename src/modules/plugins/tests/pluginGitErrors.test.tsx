@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 
 import '@/modules/i18n';
 import { PluginsProvider, usePlugins } from '@/modules/plugins/context/PluginsContext';
@@ -77,17 +77,12 @@ describe('Settings > Plugins installs the Codex Usage fork from its custom branc
     });
   }
 
-  it('selects the custom branch from the recommendation while linking to the repository', async () => {
-    const fetchMock = stubInstall();
+  it('omits the built-in Codex Usage feature from the installation recommendations', async () => {
+    stubInstall();
     renderPluginSettings();
 
-    const card = within(await screen.findByRole('group', { name: 'Codex Usage' }));
-    expect(card.getByRole('link').getAttribute('href')).toBe(codexUsageFork);
-    fireEvent.click(card.getByRole('button', { name: 'Install' }));
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/plugins/install', expect.objectContaining({
-      method: 'POST', body: JSON.stringify({ url: codexUsageFork, branch: 'custom' }),
-    })));
+    await screen.findByRole('group', { name: 'Claude Usage' });
+    expect(screen.queryByRole('group', { name: 'Codex Usage' })).toBeNull();
   });
 
   it.each([

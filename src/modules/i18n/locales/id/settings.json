@@ -712,12 +712,6 @@
       "description": "Pantau batas paket Claude Code secara langsung dan jelajahi riwayat token serta biaya 30 hari.",
       "install": "Instal"
     },
-    "codexUsagePlugin": {
-      "name": "Codex Usage",
-      "badge": "tidak resmi",
-      "description": "Pantau batas paket Codex secara langsung, waktu reset, dan aktivitas token akun selama 30 hari.",
-      "install": "Instal"
-    },
     "morePlugins": "Lainnya",
     "enable": "Aktifkan",
     "disable": "Nonaktifkan",

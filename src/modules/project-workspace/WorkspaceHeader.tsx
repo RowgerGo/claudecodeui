@@ -1,6 +1,7 @@
 import { PanelRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import { CodexUsage } from '@/modules/codex-usage';
 import type { Project, ProjectSession } from '@/shared/types';
 import { cn } from '@/shared/utils';
 import MobileMenuButton from '@/modules/project-workspace/MobileMenuButton';
@@ -37,10 +38,12 @@ export default function WorkspaceHeader({
         onRenameSession={onRenameSession}
       />
       <WorkspaceConnectionStatus />
+      <CodexUsage />
       <button
         type="button"
         aria-expanded={toolsOpen}
         aria-controls="workspace-tools"
+        title={t('toolPanel.name')}
         onClick={onToggleTools}
         className={cn(
           'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/60',
@@ -50,7 +53,7 @@ export default function WorkspaceHeader({
         )}
       >
         <PanelRight aria-hidden="true" className="h-4 w-4" />
-        {t('toolPanel.name')}
+        <span className="sr-only sm:not-sr-only">{t('toolPanel.name')}</span>
       </button>
     </header>
   );

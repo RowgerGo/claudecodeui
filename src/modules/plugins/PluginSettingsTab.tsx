@@ -41,7 +41,6 @@ type PluginRecommendation = {
   id: string;
   translationKey: string;
   repoUrl: string;
-  branch?: string;
   installedNames: string[];
   icon: LucideIcon;
   source: 'official' | 'unofficial';
@@ -120,16 +119,6 @@ const UNOFFICIAL_PLUGIN_RECOMMENDATIONS: PluginRecommendation[] = [
     translationKey: 'claudeUsagePlugin',
     repoUrl: CLAUDE_USAGE_PLUGIN_URL,
     installedNames: ['claude-usage'],
-    icon: BarChart3,
-    source: 'unofficial',
-  },
-  {
-    id: 'codex-usage',
-    translationKey: 'codexUsagePlugin',
-    repoUrl: CODEX_USAGE_PLUGIN_URL,
-    // The fork publishes its local plugin changes on this branch.
-    branch: 'custom',
-    installedNames: ['codex-usage'],
     icon: BarChart3,
     source: 'unofficial',
   },
@@ -491,13 +480,11 @@ export default function PluginSettingsTab() {
   const handleInstall = async () => {
     const url = gitUrl.trim();
     if (!url) return;
-    const normalizedUrl = normalizeRepoUrl(url);
-    const recommendation = [...OFFICIAL_PLUGIN_RECOMMENDATIONS, ...UNOFFICIAL_PLUGIN_RECOMMENDATIONS].find(
-      (entry) => entry.branch && normalizeRepoUrl(entry.repoUrl) === normalizedUrl,
-    );
+    // Manual installs of the standalone plugin still use the fork's custom branch.
+    const isCodexUsageFork = normalizeRepoUrl(url) === normalizeRepoUrl(CODEX_USAGE_PLUGIN_URL);
     setInstalling(true);
     setInstallError(null);
-    const result = await installPlugin(recommendation?.repoUrl ?? url, recommendation?.branch);
+    const result = await (isCodexUsageFork ? installPlugin(CODEX_USAGE_PLUGIN_URL, 'custom') : installPlugin(url));
     if (result.success) {
       setGitUrl('');
     } else {
@@ -511,7 +498,7 @@ export default function PluginSettingsTab() {
     setInstallingRecommendation(recommendation.id);
     setInstallError(null);
     try {
-      const result = await installPlugin(recommendation.repoUrl, recommendation.branch);
+      const result = await installPlugin(recommendation.repoUrl);
       if (!result.success) {
         setInstallError(result.error || t('pluginSettings.installFailed'));
       }

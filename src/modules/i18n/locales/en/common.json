@@ -17,6 +17,36 @@
     "upload": "Upload",
     "browse": "Browse"
   },
+  "codexUsage": {
+    "details": "Codex usage details",
+    "viewDetails": "Details",
+    "weekly": "{{pool}} weekly · {{value}} used",
+    "weeklyLabel": "Codex weekly usage",
+    "used": "{{value}} used",
+    "resetsAt": "Resets {{time}}",
+    "unknownReset": "Reset time unknown",
+    "limits": "Plan limits",
+    "noLimits": "Codex returned no plan limits.",
+    "freeResets": "Free resets",
+    "available": "{{count}} available",
+    "missingCredits": "Details are unavailable for some free resets.",
+    "credit": "Free reset {{number}}",
+    "expiresAt": "Expires {{time}}",
+    "noExpiry": "No expiration",
+    "unknownExpiry": "Expiration unknown",
+    "unavailable": "Unavailable",
+    "useReset": "Use reset…",
+    "confirm": "Use “{{name}}” to reset eligible Codex limits? This will use one free reset.\n\n{{expiry}}",
+    "applying": "Applying free reset…",
+    "readError": "Could not load Codex usage.",
+    "outcomes": {
+      "reset": "The free reset was applied.",
+      "alreadyRedeemed": "This reset was already used.",
+      "nothingToReset": "There are no eligible limits to reset.",
+      "noCredit": "This free reset is no longer available.",
+      "unknown": "Could not confirm the reset. Check the updated limits before trying again."
+    }
+  },
   "toolPanel": {
     "name": "Workspace tools",
     "close": "Close tool panel",

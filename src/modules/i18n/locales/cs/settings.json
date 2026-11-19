@@ -691,12 +691,6 @@
       "description": "Sledujte aktuální limity plánu Claude Code a procházejte 30denní historii tokenů a nákladů.",
       "install": "Instalovat"
     },
-    "codexUsagePlugin": {
-      "name": "Využití Codex",
-      "badge": "neoficiální",
-      "description": "Sledujte aktuální limity plánu Codex, časy jejich obnovení a 30denní aktivitu tokenů na účtu.",
-      "install": "Instalovat"
-    },
     "glmUsagePlugin": {
       "name": "Využití GLM",
       "badge": "neoficiální",

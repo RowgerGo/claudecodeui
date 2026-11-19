@@ -731,12 +731,6 @@
       "description": "Claude Code plan limitlerini canlı izleyin, 30 günlük token ve maliyet geçmişini inceleyin.",
       "install": "Kur"
     },
-    "codexUsagePlugin": {
-      "name": "Codex Kullanımı",
-      "badge": "resmî değil",
-      "description": "Codex plan limitlerini, sıfırlanma zamanını ve 30 günlük hesap token etkinliğini canlı izleyin.",
-      "install": "Kur"
-    },
     "glmUsagePlugin": {
       "name": "GLM Kullanımı",
       "badge": "resmî değil",

@@ -467,6 +467,10 @@ export const api = {
     updateCli: (provider: string) =>
       post(`/api/providers/${encodeURIComponent(provider)}/cli/update`),
     claudeSettingsPermissions: () => get('/api/providers/claude/settings-permissions'),
+    codexRateLimits: (details: boolean, signal: AbortSignal) =>
+      get(`/api/providers/codex/rate-limits${details ? '' : '?details=false'}`, { signal }),
+    consumeCodexResetCredit: (creditId: string, idempotencyKey: string) =>
+      post('/api/providers/codex/reset-credits/consume', { creditId, idempotencyKey, confirmed: true }),
 
     models: (provider: string) => get(`/api/providers/${provider}/models`),
     createModel: (provider: string, input: unknown) =>

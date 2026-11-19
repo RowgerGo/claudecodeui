@@ -726,12 +726,6 @@
       "description": "Sigue en vivo los límites del plan de Claude Code y explora el historial de tokens y costes de 30 días.",
       "install": "Instalar"
     },
-    "codexUsagePlugin": {
-      "name": "Uso de Codex",
-      "badge": "no oficial",
-      "description": "Sigue en vivo los límites del plan de Codex, cuándo se reinician y la actividad de tokens de la cuenta en 30 días.",
-      "install": "Instalar"
-    },
     "glmUsagePlugin": {
       "name": "Uso de GLM",
       "badge": "no oficial",
