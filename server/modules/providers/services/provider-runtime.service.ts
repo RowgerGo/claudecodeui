@@ -1,4 +1,7 @@
 import { errorMessage } from '@/shared/utils.js';
+import { sessionsDb } from '@/modules/database/index.js';
+import { broadcastSessionUpserted } from '@/modules/websocket/index.js';
+import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
@@ -44,6 +47,20 @@ const defaultDependencies: ProviderRuntimeServiceDependencies = {
   getProviderModels: (provider) => providerModelsService.getProviderModels(provider),
 };
 
+async function generateCodexThreadTitle(
+  input: Parameters<NonNullable<ProviderRuntimeContext['requestCodexThreadTitle']>>[0],
+) {
+  const row = sessionsDb.getSessionById(input.appSessionId);
+  if (!input.prompt.trim() || row?.provider !== 'codex' || row.provider_session_id !== input.threadId
+    || row.name_source !== 'fallback') return;
+
+  const title = await codexAppServer.generateThreadTitle(input);
+  // A rename, native title, or edit onto a different thread may arrive while the model runs.
+  if (title && sessionsDb.applyGeneratedCodexTitle(input.appSessionId, input.threadId, title)) {
+    await broadcastSessionUpserted(input.appSessionId, { titleOnly: true });
+  }
+}
+
 /**
  * Creates the application-facing provider runtime dispatcher.
  *
@@ -64,6 +81,11 @@ export function createProviderRuntimeService(
       dependencies.resolveResumeModel(provider.id, sessionId, requestedModel),
     getProviderModels: async () => dependencies.getProviderModels(provider.id),
     normalizeMessage: (raw, sessionId) => provider.sessions.normalizeMessage(raw, sessionId),
+    requestCodexThreadTitle(input) {
+      void generateCodexThreadTitle(input).catch(() => {
+        // Naming is optional. The first-message preview remains usable on failure.
+      });
+    },
     async isProviderInstalled() {
       try {
         return (await provider.auth.getStatus()).installed;

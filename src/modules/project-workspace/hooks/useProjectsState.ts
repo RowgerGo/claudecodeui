@@ -11,6 +11,7 @@ import type {
   Project,
   ProjectSession,
   ServerEvent,
+  SessionUpsertedEvent,
   WorkspaceTool,
 } from '@/shared/types';
 import { mergeProjectSelectionMetadata } from '@/modules/project-workspace/utils/projectSelectionMetadata';
@@ -23,29 +24,6 @@ type UseProjectsStateArgs = {
   subscribe: (listener: (event: ServerEvent) => void) => () => void;
   isMobile: boolean;
   isSessionProcessing: IsSessionProcessing;
-};
-
-/**
- * Shape of the per-session sidebar delta (`kind: session_upserted`). It carries
- * everything needed to upsert one session row in place — no full project-list
- * snapshot is ever pushed.
- *
- * Produced on the wire by exactly one builder,
- * `server/modules/websocket/services/session-upsert-broadcast.service.ts`,
- * which both the on-disk sessions watcher and the chat run registry go through.
- */
-type SessionUpsertedEvent = ServerEvent & {
-  sessionId: string;
-  providerSessionId?: string | null;
-  provider: LLMProvider;
-  session: ProjectSession;
-  project: {
-    projectId: string;
-    path: string;
-    fullPath: string;
-    displayName: string;
-    isStarred: boolean;
-  } | null;
 };
 
 type FetchProjectsOptions = {
@@ -382,6 +360,16 @@ const renameSessionInProject = (project: Project, sessionIdToRename: string, sum
   return changed ? { ...project, sessions: nextSessions } : project;
 };
 
+function updateSelectedSessionSummary(session: ProjectSession | null, sessionId: string, summary?: string): ProjectSession | null {
+  if (session?.id !== sessionId || !summary?.trim() || session.summary === summary) {
+    return session;
+  }
+  // The chat reads the one-shot search target on every new session object.
+  // A title update must not scroll the transcript back to a previous search.
+  const { __searchTargetSnippet: _snippet, __searchTargetTimestamp: _timestamp, ...details } = session;
+  return { ...details, summary };
+}
+
 const VALID_TABS: Set<string> = new Set(['chat', 'files', 'shell', 'git', 'tasks', 'browser']);
 
 const isValidTab = (tab: string): tab is AppTab => {
@@ -629,6 +617,23 @@ export function useProjectsState({
     }
   }, []);
 
+  const applySessionTitle = useCallback((sessionId: string, title: string, projectId?: string) => {
+    setProjects((previousProjects) => {
+      let changed = false;
+      const nextProjects = previousProjects.map((project) => {
+        if (projectId && project.projectId !== projectId) return project;
+        const renamedProject = renameSessionInProject(project, sessionId, title);
+        if (renamedProject !== project) {
+          changed = true;
+        }
+        return renamedProject;
+      });
+      return changed ? nextProjects : previousProjects;
+    });
+
+    setSelectedSession((previousSession) => updateSelectedSessionSummary(previousSession, sessionId, title));
+  }, []);
+
   const refreshProjectsSilently = useCallback(async () => {
     // Keep chat view stable while still syncing sidebar/session metadata in background.
     await fetchProjects({ showLoadingState: false });
@@ -834,6 +839,12 @@ export function useProjectsState({
         return;
       }
 
+      if (upsert.titleOnly) {
+        const title = upsert.session.summary?.trim();
+        if (title) applySessionTitle(upsert.sessionId, title, upsert.project?.projectId);
+        return;
+      }
+
       // The transcript of the currently viewed session changed on disk while
       // no run is active here (e.g. edited from another client or the CLI):
       // signal the chat view to reload its messages.
@@ -901,35 +912,27 @@ export function useProjectsState({
         typeof upsert.providerSessionId === 'string' && upsert.providerSessionId !== upsert.sessionId
           ? upsert.providerSessionId
           : null;
-      if (!aliasedSelectedSessionId) {
-        return;
-      }
-
-      const normalizedSelectedSession: ProjectSession = {
-        ...upsert.session,
-        id: upsert.sessionId,
-        __provider: upsert.provider,
-        __projectId: upsert.project?.projectId ?? currentSelectedSession?.__projectId,
-      };
-
       setSelectedSession((previousSession) => {
-        if (previousSession?.id !== aliasedSelectedSessionId) {
-          return previousSession;
+        if (!aliasedSelectedSessionId || previousSession?.id !== aliasedSelectedSessionId) {
+          return updateSelectedSessionSummary(previousSession, upsert.sessionId, upsert.session.summary);
         }
 
         return {
           ...previousSession,
-          ...normalizedSelectedSession,
+          ...upsert.session,
+          id: upsert.sessionId,
+          __provider: upsert.provider,
+          __projectId: upsert.project?.projectId ?? previousSession.__projectId,
         };
       });
 
-      if (sessionId === aliasedSelectedSessionId) {
+      if (aliasedSelectedSessionId && sessionId === aliasedSelectedSessionId) {
         navigate(`/session/${upsert.sessionId}`);
       }
     };
 
     return subscribe(handleEvent);
-  }, [isSessionProcessing, markSessionAttention, navigate, refreshProjectsSilently, sessionId, subscribe]);
+  }, [applySessionTitle, isSessionProcessing, markSessionAttention, navigate, refreshProjectsSilently, sessionId, subscribe]);
 
   useEffect(() => {
     return () => {
@@ -1220,32 +1223,10 @@ export function useProjectsState({
       return false;
     }
 
-    setProjects((previousProjects) => {
-      let changed = false;
-      const nextProjects = previousProjects.map((project) => {
-        const renamedProject = renameSessionInProject(project, sessionIdToRename, trimmed);
-        if (renamedProject !== project) {
-          changed = true;
-        }
-        return renamedProject;
-      });
-      return changed ? nextProjects : previousProjects;
-    });
-
-    setSelectedSession((previousSession) => {
-      if (previousSession?.id !== sessionIdToRename || previousSession.summary === trimmed) {
-        return previousSession;
-      }
-      // A session opened from a Conversations search hit carries the one-shot
-      // jump target the chat reads off every new `selectedSession` identity.
-      // Leave it behind, or the rename would scroll the transcript back to the
-      // matched message and flash the search highlight again.
-      const { __searchTargetSnippet: _snippet, __searchTargetTimestamp: _timestamp, ...session } = previousSession;
-      return { ...session, summary: trimmed };
-    });
+    applySessionTitle(sessionIdToRename, trimmed);
 
     return true;
-  }, []);
+  }, [applySessionTitle]);
 
   const loadMoreProjectSessions = useCallback(async (projectId: string) => {
     const project = projects.find((candidate) => candidate.projectId === projectId);

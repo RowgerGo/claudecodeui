@@ -6,6 +6,7 @@ import readline from 'node:readline';
 import { sessionsDb } from '@/modules/database/index.js';
 import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
 import { parseFilesInputTag, toImageAttachments } from '@/shared/image-attachments.js';
+import { extractCodexTextContent } from '@/shared/index.js';
 import type { IProviderSessions } from '@/shared/interfaces.js';
 import { prepareTranscriptMessages } from '@/shared/message-unification.js';
 import type {
@@ -285,31 +286,6 @@ export function extractCodexUserImages(
   }
 
   return attachments.length > 0 ? attachments : undefined;
-}
-
-function extractCodexTextContent(content: unknown): string {
-  if (!Array.isArray(content)) {
-    return typeof content === 'string' ? content : '';
-  }
-
-  return content
-    .map((item) => {
-      if (!item || typeof item !== 'object') {
-        return '';
-      }
-
-      const record = item as AnyRecord;
-      if (
-        (record.type === 'input_text' || record.type === 'output_text' || record.type === 'text')
-        && typeof record.text === 'string'
-      ) {
-        return record.text;
-      }
-
-      return '';
-    })
-    .filter(Boolean)
-    .join('\n');
 }
 
 /** Reads image inputs from a typed UserMessage item. */

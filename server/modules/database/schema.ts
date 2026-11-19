@@ -131,6 +131,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- id mid-run, or equals \`session_id\` for sessions discovered on disk.
     provider_session_id TEXT,
     custom_name TEXT,
+    -- Codex replaces fallback names when the native thread name arrives.
+    -- Legacy names have unknown provenance and require a matching fallback.
+    name_source TEXT NOT NULL DEFAULT 'legacy',
     project_path TEXT,
     jsonl_path TEXT,
     -- Model and reasoning effort this session runs with. Written when the user

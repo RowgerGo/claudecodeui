@@ -4,6 +4,7 @@ import { promises as fsPromises } from 'node:fs';
 
 import chokidar, { type FSWatcher } from 'chokidar';
 
+import { codexSessionSynchronizer } from '@/modules/providers/list/codex/codex-session-synchronizer.provider.js';
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
 import { broadcastSessionUpsertedBatch } from '@/modules/websocket/index.js';
 import type { LLMProvider } from '@/shared/types.js';
@@ -21,7 +22,7 @@ const PROVIDER_WATCH_PATHS: Array<{ provider: LLMProvider; rootPath: string }> =
   },
   {
     provider: 'codex',
-    rootPath: path.join(os.homedir(), '.codex', 'sessions'),
+    rootPath: path.join(path.dirname(codexSessionSynchronizer.nameIndexPath), 'sessions'),
   },
   {
     provider: 'opencode',
@@ -94,6 +95,7 @@ type PendingWatcherUpdate = {
    * transcript file names on disk only ever contain provider ids.
    */
   updatedSessionIds: Set<string>;
+  titleOnlySessionIds: Set<string>;
 };
 
 let pendingWatcherUpdate: PendingWatcherUpdate | null = null;
@@ -143,20 +145,27 @@ function schedulePendingWatcherFlush(): void {
 function queuePendingWatcherUpdate(
   eventType: WatcherEventType,
   provider: LLMProvider,
-  updatedSessionId: string | null
+  updatedSessionId: string | null,
+  titleOnly = false,
 ): void {
   if (!pendingWatcherUpdate) {
     pendingWatcherUpdate = {
       providers: new Set<LLMProvider>(),
       changeTypes: new Set<WatcherEventType>(),
       updatedSessionIds: new Set<string>(),
+      titleOnlySessionIds: new Set<string>(),
     };
   }
 
   pendingWatcherUpdate.providers.add(provider);
   pendingWatcherUpdate.changeTypes.add(eventType);
   if (updatedSessionId) {
-    pendingWatcherUpdate.updatedSessionIds.add(updatedSessionId);
+    if (!titleOnly) {
+      pendingWatcherUpdate.updatedSessionIds.add(updatedSessionId);
+      pendingWatcherUpdate.titleOnlySessionIds.delete(updatedSessionId);
+    } else if (!pendingWatcherUpdate.updatedSessionIds.has(updatedSessionId)) {
+      pendingWatcherUpdate.titleOnlySessionIds.add(updatedSessionId);
+    }
   }
 
   schedulePendingWatcherFlush();
@@ -183,7 +192,10 @@ async function flushPendingWatcherUpdate(): Promise<void> {
     // Per-session deltas instead of full project snapshots: an upsert of one
     // session can never clobber unrelated client state, so the frontend needs
     // no "suppress updates while a run is active" protection logic.
-    await broadcastSessionUpsertedBatch(queuedUpdate.updatedSessionIds);
+    if (queuedUpdate.updatedSessionIds.size) await broadcastSessionUpsertedBatch(queuedUpdate.updatedSessionIds);
+    if (queuedUpdate.titleOnlySessionIds.size) {
+      await broadcastSessionUpsertedBatch(queuedUpdate.titleOnlySessionIds, { titleOnly: true });
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('Session watcher refresh failed while broadcasting session_upserted', { error: message });
@@ -210,6 +222,12 @@ async function onUpdate(
   }
 
   try {
+    if (provider === 'codex' && filePath === codexSessionSynchronizer.nameIndexPath) {
+      for (const appId of await codexSessionSynchronizer.synchronizeNames()) {
+        queuePendingWatcherUpdate(eventType, provider, appId, true);
+      }
+      return;
+    }
     const result = await sessionSynchronizerService.synchronizeProviderFile(provider, filePath);
     if (!result.indexed) {
       return;
@@ -247,7 +265,8 @@ export async function initializeSessionsWatcher(): Promise<void> {
     try {
       await fsPromises.mkdir(rootPath, { recursive: true });
 
-      const watcher = chokidar.watch(rootPath, {
+      const watchPaths = provider === 'codex' ? [rootPath, codexSessionSynchronizer.nameIndexPath] : rootPath;
+      const watcher = chokidar.watch(watchPaths, {
         ignored: createWatcherIgnoredMatcher(rootPath),
         persistent: true,
         ignoreInitial: true,
@@ -274,6 +293,11 @@ export async function initializeSessionsWatcher(): Promise<void> {
           console.error(`Session watcher error for provider "${provider}"`, { error: message });
         });
 
+      if (provider === 'codex') {
+        // ignoreInitial suppresses index writes between the startup scan and
+        // chokidar becoming ready. Catch up once before relying on its events.
+        watcher.once('ready', () => { void onUpdate('change', codexSessionSynchronizer.nameIndexPath, provider); });
+      }
       watchers.push(watcher);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

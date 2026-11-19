@@ -4,7 +4,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import type { TFunction } from 'i18next';
 import { beforeEach, test, vi } from 'vitest';
 
-import type { Project, RecentConversationListItem } from '@/shared/types';
+import type { Project, RecentConversationListItem, ServerEvent } from '@/shared/types';
 
 /**
  * The Conversations list keeps its own copy of each session's title and is
@@ -14,6 +14,11 @@ import type { Project, RecentConversationListItem } from '@/shared/types';
  */
 
 const recentConversationsResponse = vi.fn();
+const listeners = new Set<(event: ServerEvent) => void>();
+const subscribe = (listener: (event: ServerEvent) => void) => {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+};
 
 vi.mock('@/shared/api', () => ({
   api: {
@@ -48,6 +53,7 @@ const buildProject = (summaries: Record<string, string>): Project => ({
 
 const renderController = (initialProjects: Project[]) => renderHook(
   ({ projects }: { projects: Project[] }) => useSidebarController({
+    subscribe,
     projects,
     selectedProject: null,
     selectedSession: null,
@@ -79,6 +85,7 @@ const openConversationsTab = async (initialProjects: Project[]) => {
 
 beforeEach(() => {
   localStorage.clear();
+  listeners.clear();
   recentConversationsResponse.mockReset();
   recentConversationsResponse.mockResolvedValue({
     ok: true,
@@ -90,6 +97,18 @@ beforeEach(() => {
       },
     }),
   });
+});
+
+test('a title-only event updates a recent conversation outside the loaded project pages', async () => {
+  const { result } = await openConversationsTab([buildProject({ 'session-2': '' })]);
+  act(() => {
+    for (const listener of listeners) listener({
+      kind: 'session_upserted', sessionId: 'session-1', titleOnly: true,
+      session: { id: 'session-1', summary: 'Generated title' },
+    });
+  });
+  assert.deepEqual(result.current.recentConversations.map((row) => row.sessionTitle), ['Generated title', 'session-2']);
+  assert.equal(recentConversationsResponse.mock.calls.length, 1);
 });
 
 test('a title renamed in `projects` lands on the matching conversation row', async () => {

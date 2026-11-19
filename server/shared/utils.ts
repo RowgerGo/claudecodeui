@@ -987,6 +987,16 @@ export function readProviderSkillMarkdownDefinitionFromContent(
 // ---------------------------
 //----------------- SESSION SYNCHRONIZER TITLE HELPERS ------------
 /**
+ * Builds the opening-message preview returned when the sessions service creates
+ * a conversation. The Codex indexer also uses the historical four-word rule
+ * to recognize provisional names recorded before their origin was tracked.
+ */
+export function buildCloudCliSessionName(initialMessage: string): string {
+  const words = initialMessage.trim().split(/\s+/).filter(Boolean);
+  return words.slice(0, 4).join(' ') || 'Untitled Session';
+}
+
+/**
  * Produces a compact session title suitable for UI rendering and DB storage.
  *
  * Use this when converting provider-native names into a consistent title value.
@@ -1262,16 +1272,17 @@ export async function readFileTimestamps(
 // ---------------------------
 //----------------- SESSION SYNCHRONIZER JSONL PARSING HELPERS ------------
 /**
- * Builds a first-seen key/value lookup map from a JSONL file.
+ * Builds a key/value lookup map from a provider's JSONL index.
  *
  * Use this for provider index files where session id -> display name metadata
- * is stored line-by-line. The first value for each key wins, preserving the
- * earliest known label while avoiding repeated map overwrites.
+ * is stored line-by-line. Claude history uses the first value for each key.
+ * Codex appends renames to its index and uses the latest nonblank value.
  */
 export async function buildLookupMap(
   filePath: string,
   keyField: string,
-  valueField: string
+  valueField: string,
+  selection: 'first' | 'last-nonblank' = 'first',
 ): Promise<Map<string, string>> {
   const lookup = new Map<string, string>();
 
@@ -1294,10 +1305,12 @@ export async function buildLookupMap(
         continue;
       }
 
+      if (!parsed || typeof parsed !== 'object') continue;
       const key = parsed[keyField];
       const value = parsed[valueField];
 
-      if (typeof key === 'string' && typeof value === 'string' && !lookup.has(key)) {
+      if (typeof key === 'string' && typeof value === 'string'
+        && (selection === 'first' ? !lookup.has(key) : Boolean(value.trim()))) {
         lookup.set(key, value);
       }
     }
@@ -1353,6 +1366,38 @@ export async function extractFirstValidJsonlData<T>(
   }
 
   return null;
+}
+
+// ---------------------------
+//----------------- CODEX TRANSCRIPT ROW UTILITIES ------------
+/**
+ * Extracts Codex text blocks in provider order, accepting either a string or
+ * an array of typed input/output segments. The Codex history reader and title
+ * synchronizer use this to agree on a persisted user message's visible text.
+ */
+export function extractCodexTextContent(content: unknown): string {
+  if (!Array.isArray(content)) {
+    return typeof content === 'string' ? content : '';
+  }
+
+  return content
+    .map((item) => {
+      if (!item || typeof item !== 'object') {
+        return '';
+      }
+
+      const record = item as AnyRecord;
+      if (
+        (record.type === 'input_text' || record.type === 'output_text' || record.type === 'text')
+        && typeof record.text === 'string'
+      ) {
+        return record.text;
+      }
+
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n');
 }
 
 // ---------------------------

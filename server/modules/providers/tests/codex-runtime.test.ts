@@ -5,9 +5,13 @@ import path from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 
+import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
 import { codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
 import { CodexSessionsProvider } from '@/modules/providers/list/codex/codex-sessions.provider.js';
+import { providerRuntimeService } from '@/modules/providers/services/provider-runtime.service.js';
+import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { chatRunRegistry, connectedClients, runDetachedChatTurn } from '@/modules/websocket/index.js';
 import { parseFilesInputTag } from '@/shared/image-attachments.js';
 import type { AnyRecord, ChatCodexOperation, CodexControlHooks, CodexGoal, NormalizedMessage, ProviderRuntimeContext } from '@/shared/types.js';
 import { AppError } from '@/shared/utils.js';
@@ -103,6 +107,56 @@ function recordMessages() {
     },
   };
 }
+
+test('the Codex gateway publishes a generated title after the main turn returns and never regenerates it on resume',
+  { timeout: 10_000 }, async (t) => {
+    const readRequests = await useFakeAppServer(t, 'complete');
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'cloudcli-title-gateway-'));
+    const previousPath = process.env.DATABASE_PATH;
+    closeConnection();
+    process.env.DATABASE_PATH = path.join(cwd, 'auth.db');
+    t.after(async () => {
+      connectedClients.clear();
+      chatRunRegistry.clearAll();
+      closeConnection();
+      if (previousPath === undefined) delete process.env.DATABASE_PATH;
+      else process.env.DATABASE_PATH = previousPath;
+      await rm(cwd, { recursive: true, force: true });
+    });
+    await initializeDatabase();
+    const prompt = '让侧边栏显示一个概括首条消息的标题';
+    const title = '优化侧栏会话标题';
+    const { sessionId } = sessionsService.createAppSession('codex', cwd, prompt);
+    let finishTitle!: (value: string) => void;
+    const generated = new Promise<string>((resolve) => { finishTitle = resolve; });
+    const generation = t.mock.method(codexAppServer, 'generateThreadTitle',
+      ({ prompt: source }: Parameters<typeof codexAppServer.generateThreadTitle>[0]) => {
+        assert.equal(source, prompt);
+        return generated;
+      });
+    const titleEvent = new Promise<AnyRecord>((resolve) => {
+      connectedClients.add({ readyState: 1, send(data) {
+        const event = JSON.parse(data);
+        if (event.kind === 'session_upserted' && event.session?.summary === title) resolve(event);
+      } });
+    });
+    const send = (content: string) => runDetachedChatTurn({
+      sessionId, userId: null, content, options: { model: 'gpt-6.2-sol' },
+    }, { runtime: providerRuntimeService });
+    assert.deepEqual(await send(prompt), { started: true, error: null });
+    assert.equal(generation.mock.callCount(), 1);
+    assert.equal(sessionsDb.getSessionById(sessionId)?.custom_name, prompt);
+
+    finishTitle(title);
+    const event = await titleEvent;
+    assert.equal(event.sessionId, sessionId);
+    assert.equal(event.providerSessionId, 'native-thread');
+    assert.equal(event.session.id, sessionId);
+    assert.equal(sessionsDb.getSessionById(sessionId)?.custom_name, title);
+    assert.deepEqual(await send('继续'), { started: true, error: null });
+    assert.equal((await readRequests()).find((row) => row.method === 'thread/resume')?.params.threadId, 'native-thread');
+    assert.equal(generation.mock.callCount(), 1);
+  });
 
 for (const resumed of [false, true]) {
   for (const permissionMode of [undefined, 'default', 'unknown', 'acceptEdits', 'bypassPermissions']) {

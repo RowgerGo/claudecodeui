@@ -510,6 +510,8 @@ export type SessionUpsertedProject = {
  */
 export type SessionUpsertedEvent = {
   kind: 'session_upserted';
+  /** Updates the title of an existing session without announcing new transcript activity. */
+  titleOnly?: true;
   sessionId: string;
   providerSessionId: string | null;
   provider: LLMProvider;
@@ -928,6 +930,14 @@ export type ProviderRuntimeContext = {
   getProviderModels(): Promise<ProviderModelsDefinition>;
   normalizeMessage(raw: unknown, sessionId: string | null): NormalizedMessage[];
   isProviderInstalled(): Promise<boolean>;
+  /** Starts background sidebar naming once Codex accepts the first prompt for a new app session. */
+  requestCodexThreadTitle?(input: {
+    appSessionId: string;
+    threadId: string;
+    prompt: string;
+    cwd: string;
+    model?: string;
+  }): void;
   /**
    * Builds the SDK query for a run. Production leaves this unset and the
    * runtime uses the SDK's own; tests supply a scripted stream so the hold

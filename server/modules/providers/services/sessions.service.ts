@@ -17,6 +17,7 @@ import type {
   NormalizedMessage,
   WorkflowAgentActivity,
 } from '@/shared/types.js';
+import { buildCloudCliSessionName } from '@/shared/index.js';
 import { AppError, createNormalizedMessage, sliceTailPage } from '@/shared/utils.js';
 
 /**
@@ -94,13 +95,6 @@ type SessionDetails = {
     isArchived: boolean;
   } | null;
 };
-
-const MAX_CLOUDCLI_SESSION_NAME_WORDS = 4;
-
-function buildCloudCliSessionName(initialMessage: string): string {
-  const words = initialMessage.trim().split(/\s+/).filter(Boolean);
-  return words.slice(0, MAX_CLOUDCLI_SESSION_NAME_WORDS).join(' ') || 'Untitled Session';
-}
 
 /**
  * Removes one file if it exists.
@@ -414,8 +408,8 @@ export const sessionsService = {
    * chat, navigates to the returned id immediately, and the id never changes
    * for the lifetime of the conversation. The provider-native id is mapped to
    * this row later, when the provider runtime announces it mid-run. Its title
-   * comes directly from the first visible CloudCLI message and is limited to
-   * four whole words before any provider-owned storage exists.
+   * starts as a preview of the first visible CloudCLI message. Codex can
+   * replace that preview with a generated title after accepting the turn.
    */
   createAppSession(
     provider: LLMProvider,
@@ -431,7 +425,10 @@ export const sessionsService = {
     }
 
     const sessionId = randomUUID();
-    const sessionName = buildCloudCliSessionName(initialMessage);
+    const preview = buildCloudCliSessionName(initialMessage);
+    // An unspaced prompt (common in Chinese) can be a whole paragraph even after the word limit.
+    const characters = provider === 'codex' ? Array.from(preview) : [];
+    const sessionName = characters.length > 64 ? characters.slice(0, 63).join('') + '…' : preview;
     sessionsDb.createAppSession(sessionId, provider, normalizedProjectPath, sessionName);
 
     return {

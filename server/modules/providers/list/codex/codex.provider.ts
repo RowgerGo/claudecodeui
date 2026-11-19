@@ -4,7 +4,7 @@ import { CodexForkProvider } from '@/modules/providers/list/codex/codex-fork.pro
 import { CodexProviderModels } from '@/modules/providers/list/codex/codex-models.provider.js';
 import { codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
 import { CodexMcpProvider } from '@/modules/providers/list/codex/codex-mcp.provider.js';
-import { CodexSessionSynchronizer } from '@/modules/providers/list/codex/codex-session-synchronizer.provider.js';
+import { codexSessionSynchronizer } from '@/modules/providers/list/codex/codex-session-synchronizer.provider.js';
 import { CodexSessionsProvider } from '@/modules/providers/list/codex/codex-sessions.provider.js';
 import { CodexSkillsProvider } from '@/modules/providers/list/codex/codex-skills.provider.js';
 import type {
@@ -25,7 +25,7 @@ export class CodexProvider extends AbstractProvider {
   readonly skills: IProviderSkills = new CodexSkillsProvider();
   readonly sessions: IProviderSessions = new CodexSessionsProvider();
   readonly fork: IProviderFork = new CodexForkProvider();
-  readonly sessionSynchronizer: IProviderSessionSynchronizer = new CodexSessionSynchronizer();
+  readonly sessionSynchronizer: IProviderSessionSynchronizer = codexSessionSynchronizer;
 
   constructor() {
     super('codex');

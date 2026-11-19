@@ -10,6 +10,8 @@ type SessionRow = {
   project_path: string | null;
   jsonl_path: string | null;
   custom_name: string | null;
+  /** Codex uses the name origin to protect manual titles during provider synchronization. */
+  name_source: 'fallback' | 'generated' | 'provider' | 'manual' | 'legacy';
   /** Model this session runs with; NULL until the app records one for it. */
   model: string | null;
   /** Reasoning effort this session runs with; NULL until the app records one. */
@@ -27,7 +29,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, model, effort, forked_from_session_id, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, name_source, model, effort, forked_from_session_id, isArchived, created_at, updated_at';
 
 const SQLITE_UTC_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
@@ -116,6 +118,7 @@ export const sessionsDb = {
            jsonl_path = ?,
            isArchived = CASE WHEN ? IS NULL OR julianday(?) > julianday(updated_at) THEN 0 ELSE isArchived END,
            custom_name = CASE
+             WHEN provider = 'codex' AND name_source <> 'fallback' THEN custom_name
              WHEN session_id <> provider_session_id AND custom_name IS NOT NULL THEN custom_name
              ELSE COALESCE(?, custom_name)
            END
@@ -138,8 +141,8 @@ export const sessionsDb = {
     // keyed by the provider-native id for both columns. The ON CONFLICT path
     // covers legacy rows that predate the provider_session_id mapping.
     db.prepare(
-      `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, project_path, jsonl_path, isArchived, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 0, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
+      `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, name_source, project_path, jsonl_path, isArchived, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'fallback', ?, ?, 0, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
        ON CONFLICT(session_id) DO UPDATE SET
          provider = excluded.provider,
          provider_session_id = excluded.provider_session_id,
@@ -148,6 +151,7 @@ export const sessionsDb = {
          jsonl_path = excluded.jsonl_path,
          isArchived = CASE WHEN ? IS NULL OR julianday(excluded.updated_at) > julianday(sessions.updated_at) THEN 0 ELSE sessions.isArchived END,
          custom_name = CASE
+           WHEN sessions.provider = 'codex' AND sessions.name_source <> 'fallback' THEN sessions.custom_name
            WHEN sessions.session_id <> sessions.provider_session_id AND sessions.custom_name IS NOT NULL
              THEN sessions.custom_name
            ELSE COALESCE(excluded.custom_name, sessions.custom_name)
@@ -188,8 +192,8 @@ export const sessionsDb = {
     projectsDb.createProjectPath(normalizedProjectPath);
 
     db.prepare(
-      `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, project_path, jsonl_path, isArchived, created_at, updated_at)
-       VALUES (?, ?, NULL, ?, ?, NULL, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, name_source, project_path, jsonl_path, isArchived, created_at, updated_at)
+       VALUES (?, ?, NULL, ?, 'fallback', ?, NULL, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
     ).run(sessionId, provider, customName ?? null, normalizedProjectPath);
 
     return sessionId;
@@ -226,8 +230,8 @@ export const sessionsDb = {
       db.prepare('DELETE FROM sessions WHERE session_id = ? AND session_id <> ?')
         .run(input.providerSessionId, input.sessionId);
       db.prepare(
-        `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, project_path, jsonl_path, model, effort, forked_from_session_id, isArchived, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+        `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, name_source, project_path, jsonl_path, model, effort, forked_from_session_id, isArchived, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
       ).run(
         input.sessionId,
         input.provider,
@@ -276,6 +280,14 @@ export const sessionsDb = {
              updated_at = CURRENT_TIMESTAMP
            WHERE session_id = ?`
         ).run(providerSessionId, duplicate.jsonl_path, duplicate.custom_name, sessionId);
+        // A native name or a rename of the provisional watcher row can arrive before the mapping.
+        if (duplicate.provider === 'codex' && (duplicate.name_source === 'provider' || duplicate.name_source === 'manual')) {
+          db.prepare(
+            `UPDATE sessions SET custom_name = ?, name_source = ?
+             WHERE session_id = ? AND provider = 'codex'
+               AND (name_source IN ('fallback', 'generated') OR (name_source = 'provider' AND ? = 'manual'))`
+          ).run(duplicate.custom_name, duplicate.name_source, sessionId, duplicate.name_source);
+        }
         return;
       }
 
@@ -519,9 +531,40 @@ export const sessionsDb = {
     const db = getConnection();
     db.prepare(
       `UPDATE sessions
-       SET custom_name = ?
+       SET custom_name = ?, name_source = 'manual'
        WHERE session_id = ?`
     ).run(customName, sessionId);
+  },
+
+  /**
+   * Applies a native thread name without changing activity or archive status.
+   * Codex synchronization and runtime notifications pass the provider id. For
+   * legacy names, callers may supply the fallback verified from that rollout.
+   * Return the app id for broadcasting only when stored metadata changed.
+   */
+  applyCodexThreadName(providerSessionId: string, name: string, eligibleLegacyFallback?: string): string | null {
+    if (!name.trim()) return null;
+    const row = getConnection().prepare(
+      `UPDATE sessions SET custom_name = ?, name_source = 'provider'
+       WHERE provider = 'codex' AND provider_session_id = ?
+         AND (name_source IN ('fallback', 'generated', 'provider') OR (name_source = 'legacy' AND custom_name = ?))
+         AND (name_source <> 'provider' OR custom_name IS NOT ?)
+       RETURNING session_id`
+    ).get(name, providerSessionId, eligibleLegacyFallback ?? null, name) as { session_id: string } | undefined;
+    return row?.session_id ?? null;
+  },
+
+  /**
+   * The Codex runtime generates a short title in the background. Publish it
+   * only while the same thread still owns the app row and its provisional name.
+   */
+  applyGeneratedCodexTitle(appSessionId: string, providerSessionId: string, name: string): boolean {
+    if (!name.trim()) return false;
+    return getConnection().prepare(
+      `UPDATE sessions SET custom_name = ?, name_source = 'generated'
+       WHERE session_id = ? AND provider_session_id = ? AND provider = 'codex'
+         AND name_source = 'fallback' AND forked_from_session_id IS NULL`
+    ).run(name, appSessionId, providerSessionId).changes > 0;
   },
 
   getSessionById(sessionId: string): SessionRow | null {

@@ -317,6 +317,7 @@ class CodexThreadConnection {
   private threadOptions?: ThreadOptions;
   private opening?: Promise<void>;
   private threadOpened = false;
+  private needsFirstPromptTitle = false;
   private earlyEvents: [string, AnyRecord][] = [];
   private activeTurn?: Turn;
   private pendingTurn?: PendingTurn;
@@ -388,6 +389,7 @@ class CodexThreadConnection {
       }
       this.threadId = nativeId;
       this.threadOpened = true;
+      this.needsFirstPromptTitle = !resumedId && !opened?.thread?.name;
       this.threadOptions = options;
       this.workingDirectory = options.cwd;
       if (!this.appSessionId && !sessions.has(nativeId)) sessions.set(nativeId, this);
@@ -428,6 +430,15 @@ class CodexThreadConnection {
       }
     }
     await this.openThread(resolved, hooks.bindThread);
+  }
+
+  private requestFirstPromptTitle(prompt: string) {
+    if (!this.needsFirstPromptTitle || !this.appSessionId || !this.threadId || !this.threadOptions) return;
+    this.needsFirstPromptTitle = false;
+    this.context.requestCodexThreadTitle?.({
+      appSessionId: this.appSessionId, threadId: this.threadId, prompt,
+      cwd: this.threadOptions.cwd, model: this.threadOptions.model,
+    });
   }
 
   async run(command: string, options: AnyRecord, writer: ProviderRuntimeWriter): Promise<void> {
@@ -480,6 +491,7 @@ class CodexThreadConnection {
         ...turnOverrides,
       }));
       if (typeof response?.turn?.id !== 'string') throw new Error('Codex did not return a turn id.');
+      this.requestFirstPromptTitle(command);
       // The notification normally arrives first. If it has not, seed the
       // same turn state from the reply without settling it.
       if (!pending.turn) this.startTurn(response.turn.id);
@@ -1077,6 +1089,7 @@ class CodexThreadConnection {
       const response = readObjectRecord(await connection.call('thread/goal/set', params));
       const goal = readGoal(response?.goal, threadId);
       if (version === this.goalVersion || (replacing && !this.goal)) this.setGoal(goal);
+      if (startsThread && goal) this.requestFirstPromptTitle(goal.objective);
       hooks.onAccepted();
       return { status: 'completed', goal: this.goal };
     } catch (error) {

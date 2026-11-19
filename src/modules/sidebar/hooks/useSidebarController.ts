@@ -4,7 +4,7 @@ import type { TFunction } from 'i18next';
 import { api } from '@/shared/api';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 import { usePaletteOps } from '@/modules/command-palette';
-import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode, SidebarSessionSelection } from '@/shared/types';
+import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ServerEvent, SessionUpsertedEvent, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode, SidebarSessionSelection } from '@/shared/types';
 import {
   filterProjects,
   getAllSessions,
@@ -55,6 +55,7 @@ type RecentConversationsApiPayload = {
 };
 
 type UseSidebarControllerArgs = {
+  subscribe?: (listener: (event: ServerEvent) => void) => () => void;
   projects: Project[];
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
@@ -79,6 +80,7 @@ type UseSidebarControllerArgs = {
 
 /** Used by Sidebar to coordinate project navigation, expansion and session actions. */
 export function useSidebarController({
+  subscribe,
   projects,
   selectedProject,
   selectedSession: _selectedSession,
@@ -288,6 +290,24 @@ export function useSidebarController({
       setIsArchivedSessionsLoading(false);
     }
   }, []);
+
+  const updateRecentTitle = useCallback((sessionId: string, title: string) => {
+    setRecentConversations((rows) => {
+      const index = rows.findIndex((row) => row.sessionId === sessionId);
+      if (index < 0 || rows[index].sessionTitle === title) return rows;
+      const updated = rows.slice();
+      updated[index] = { ...rows[index], sessionTitle: title };
+      return updated;
+    });
+  }, []);
+
+  // A recent conversation can be loaded even when its project page is not.
+  useEffect(() => subscribe?.((event) => {
+    if (event.kind !== 'session_upserted' || !event.titleOnly) return;
+    const upsert = event as SessionUpsertedEvent;
+    const title = upsert.session?.summary?.trim();
+    if (title) updateRecentTitle(upsert.sessionId, title);
+  }), [subscribe, updateRecentTitle]);
 
   const fetchRecentConversationsPage = useCallback(async (offset: number, append: boolean) => {
     const requestSequence = ++recentConversationsSeqRef.current;
@@ -1244,11 +1264,7 @@ export function useSidebarController({
           // from the Conversations list kept its old title until the next fetch.
           // Patching in place also preserves the pages already loaded past the
           // first, which refetching page zero would discard.
-          setRecentConversations((previous) => previous.map((conversation) => (
-            conversation.sessionId === sessionId
-              ? { ...conversation, sessionTitle: trimmed }
-              : conversation
-          )));
+          updateRecentTitle(sessionId, trimmed);
           await onRefresh();
         } else {
           console.error('[Sidebar] Failed to rename session:', response.status);
@@ -1261,7 +1277,7 @@ export function useSidebarController({
         setActiveRename(null);
       }
     },
-    [onRefresh, t],
+    [onRefresh, t, updateRecentTitle],
   );
 
   /**

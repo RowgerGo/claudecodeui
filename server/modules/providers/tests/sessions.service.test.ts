@@ -57,6 +57,14 @@ test('app session names use at most four whole words from the initial message', 
   });
 });
 
+test('a long unspaced Codex opening gets a bounded preview until its title arrives', { concurrency: false }, async () => {
+  await withIsolatedDatabase(() => {
+    const opening = '修复登录界面闪退的问题🚀'.repeat(12);
+    const { sessionName } = sessionsService.createAppSession('codex', '/tmp/codex-preview', opening);
+    assert.equal(sessionName, Array.from(opening).slice(0, 63).join('') + '…');
+  });
+});
+
 test('app sessions without message text receive a stable fallback name', { concurrency: false }, async () => {
   await withIsolatedDatabase(() => {
     const result = sessionsService.createAppSession('claude', '/tmp/attachment-only-project', '  \n ');

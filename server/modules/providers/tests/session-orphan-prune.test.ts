@@ -10,6 +10,8 @@ import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/datab
 // first imported, so HOME has to point at an empty fixture home *before* that
 // import runs. Otherwise the sync pass walks the developer's real ~/.claude.
 const fixtureHome = await mkdtemp(path.join(os.tmpdir(), 'session-prune-home-'));
+const previousCodexHome = process.env.CODEX_HOME;
+process.env.CODEX_HOME = path.join(fixtureHome, '.codex');
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
 process.env.HOME = fixtureHome;
@@ -20,6 +22,8 @@ const { sessionSynchronizerService } = await import(
 );
 
 process.on('exit', () => {
+  if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = previousCodexHome;
   if (previousHome === undefined) {
     delete process.env.HOME;
   } else {

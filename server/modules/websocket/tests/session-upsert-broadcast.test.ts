@@ -54,8 +54,24 @@ test('an upsert always carries the provider session id', async () => {
 
     assert.equal(connection.frames.length, 1);
     assert.equal(connection.frames[0].kind, 'session_upserted');
+    assert.ok(!('titleOnly' in connection.frames[0]));
     assert.equal(connection.frames[0].sessionId, 'app-1');
     assert.equal(connection.frames[0].providerSessionId, 'native-1');
+  });
+});
+
+test('both broadcast paths mark title corrections without changing the canonical session id', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-title', 'codex', '/workspace/demo', 'Generated title');
+    sessionsDb.assignProviderSessionId('app-title', 'native-title');
+    const connection = new FakeConnection();
+    connectedClients.add(connection as never);
+
+    await broadcastSessionUpserted('app-title', { titleOnly: true });
+    await broadcastSessionUpsertedBatch(['native-title'], { titleOnly: true });
+    assert.deepEqual(connection.frames.map((frame) => [frame.sessionId, frame.titleOnly]), [
+      ['app-title', true], ['app-title', true],
+    ]);
   });
 });
 

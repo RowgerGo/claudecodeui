@@ -5,6 +5,8 @@ import { generateDisplayName } from '@/modules/projects/index.js';
 import { broadcastToConnectedClients } from '@/modules/websocket/services/websocket-state.service.js';
 import type { SessionUpsertedEvent } from '@/shared/types.js';
 
+type BroadcastOptions = Pick<SessionUpsertedEvent, 'titleOnly'>;
+
 /**
  * The single producer of the `session_upserted` delta.
  *
@@ -20,6 +22,7 @@ import type { SessionUpsertedEvent } from '@/shared/types.js';
  */
 async function buildSessionUpsertedEvent(
   sessionIdOrProviderSessionId: string,
+  options?: BroadcastOptions,
 ): Promise<SessionUpsertedEvent | null> {
   // Resolving by provider id first covers the watcher, which only ever sees
   // the id written in the transcript. For a row where the two ids are equal
@@ -39,6 +42,7 @@ async function buildSessionUpsertedEvent(
 
   return {
     kind: 'session_upserted',
+    ...(options?.titleOnly ? { titleOnly: true } : {}),
     sessionId: row.session_id,
     providerSessionId: row.provider_session_id ?? null,
     // The column is a plain TEXT and typed as `string` on the row, but only
@@ -65,9 +69,9 @@ async function buildSessionUpsertedEvent(
   };
 }
 
-/** Announces one session. Used by the chat run registry when a run reports its provider-native id. */
-export async function broadcastSessionUpserted(sessionIdOrProviderSessionId: string): Promise<void> {
-  const event = await buildSessionUpsertedEvent(sessionIdOrProviderSessionId);
+/** Announces session activity to the sidebar or a title update from the providers module. */
+export async function broadcastSessionUpserted(sessionIdOrProviderSessionId: string, options?: BroadcastOptions): Promise<void> {
+  const event = await buildSessionUpsertedEvent(sessionIdOrProviderSessionId, options);
   if (event) {
     broadcastToConnectedClients(JSON.stringify(event));
   }
@@ -80,10 +84,11 @@ export async function broadcastSessionUpserted(sessionIdOrProviderSessionId: str
  */
 export async function broadcastSessionUpsertedBatch(
   sessionIds: Iterable<string>,
+  options?: BroadcastOptions,
 ): Promise<void> {
   const payloads: string[] = [];
   for (const sessionId of sessionIds) {
-    const event = await buildSessionUpsertedEvent(sessionId);
+    const event = await buildSessionUpsertedEvent(sessionId, options);
     if (event) {
       payloads.push(JSON.stringify(event));
     }
@@ -91,6 +96,3 @@ export async function broadcastSessionUpsertedBatch(
 
   broadcastToConnectedClients(payloads);
 }
-
-/** @internal Exported for the broadcast tests, which assert the payload shape directly. */
-export { buildSessionUpsertedEvent };

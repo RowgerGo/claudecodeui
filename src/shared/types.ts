@@ -311,6 +311,31 @@ export type ServerEvent = {
   [key: string]: unknown;
 };
 
+/**
+ * Shape of the per-session sidebar delta (`kind: session_upserted`). It carries
+ * everything needed to upsert one session row in place — no full project-list
+ * snapshot is ever pushed.
+ *
+ * Produced on the wire by exactly one builder,
+ * `server/modules/websocket/services/session-upsert-broadcast.service.ts`,
+ * which both the on-disk sessions watcher and the chat run registry go through.
+ */
+export type SessionUpsertedEvent = ServerEvent & {
+  /** A title correction patches loaded rows without changing session activity or pagination. */
+  titleOnly?: true;
+  sessionId: string;
+  providerSessionId?: string | null;
+  provider: LLMProvider;
+  session: ProjectSession;
+  project: {
+    projectId: string;
+    path: string;
+    fullPath: string;
+    displayName: string;
+    isStarred: boolean;
+  } | null;
+};
+
 // ---------------------------
 
 //----------------- CODEX CHAT CONTROL ------------

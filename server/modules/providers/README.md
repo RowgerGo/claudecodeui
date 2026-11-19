@@ -209,7 +209,7 @@ Current session sync roots are:
 | Provider | Scan Roots | Metadata Helpers / Notes |
 | --- | --- | --- |
 | Claude | `~/.claude/projects/**/*.jsonl` | Uses `~/.claude/history.jsonl` for name lookup and the trailing `ai-title`, `last-prompt`, or `custom-title` entries for title recovery. |
-| Codex | `~/.codex/sessions/**/*.jsonl` | Uses `~/.codex/session_index.jsonl` for title lookup and the last `task_complete` message for a fallback title. |
+| Codex | `$CODEX_HOME/sessions/**/*.jsonl` (defaults to `~/.codex/sessions`) | New CloudCLI chats generate a short title from the opening prompt. The watcher picks up later native titles from `session_index.jsonl` and preserves manual CloudCLI names. Imported rollouts can use the last `task_complete` message as a fallback. |
 | Cursor | `~/.cursor/projects/**/*.jsonl` | Uses sibling `worker.log` to recover `workspacePath`, then derives the session title from the first user prompt. |
 | OpenCode | `~/.local/share/opencode/opencode.db` | Reads active sessions/messages/parts from OpenCode's shared SQLite database and stores `jsonl_path` as `null` so deleting one app session cannot remove the shared DB. |
 

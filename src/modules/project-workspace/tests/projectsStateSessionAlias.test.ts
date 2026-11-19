@@ -190,3 +190,41 @@ test('an upsert for a session that is already canonical does not renavigate', as
   assert.equal(result.current.selectedSession?.id, APP_SESSION_ID);
   assert.deepEqual(navigate.mock.calls, []);
 });
+
+test('a generated Codex title updates the selected session and sidebar without replaying a search jump', async () => {
+  const session: ProjectSession = { id: APP_SESSION_ID, summary: 'Please update the sidebar', __provider: 'codex' };
+  respondWith([buildProject([session])]);
+  const navigate = vi.fn();
+  const { result } = await renderProjectsState(navigate, APP_SESSION_ID);
+  await waitFor(() => assert.equal(result.current.selectedSession?.id, APP_SESSION_ID));
+  act(() => {
+    result.current.handleSessionSelect({
+      ...session,
+      __searchTargetSnippet: 'matched text',
+      __searchTargetTimestamp: '2026-01-01T00:00:00.000Z',
+    });
+  });
+  navigate.mockClear();
+
+  const upsert = { ...buildUpsert(PROVIDER_SESSION_ID), provider: 'codex', titleOnly: true };
+  const generatedTitle = 'Update sidebar titles';
+  act(() => emit({ ...upsert, session: { ...upsert.session, summary: generatedTitle } }));
+  const selected = result.current.selectedSession;
+  assert.equal(selected?.summary, generatedTitle);
+  assert.equal(result.current.projects[0].sessions?.[0].summary, generatedTitle);
+  assert.equal(selected?.__searchTargetSnippet, undefined);
+  assert.equal(selected?.__searchTargetTimestamp, undefined);
+  assert.equal(result.current.externalMessageUpdate, 0);
+
+  act(() => {
+    emit({ ...upsert, session: { ...upsert.session, summary: generatedTitle } });
+    emit({ ...upsert, session: { ...upsert.session, summary: '' } });
+  });
+  assert.equal(result.current.selectedSession, selected);
+  assert.deepEqual(navigate.mock.calls, []);
+
+  const projects = result.current.projects;
+  act(() => emit({ ...upsert, sessionId: 'off-page', session: { id: 'off-page', summary: 'Historical title' } }));
+  assert.equal(result.current.projects, projects);
+  assert.equal(result.current.sidebarSharedProps.attentionSessionIds.size, 0);
+});

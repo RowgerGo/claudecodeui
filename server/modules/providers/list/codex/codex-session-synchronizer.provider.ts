@@ -1,109 +1,135 @@
 import os from 'node:os';
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 
 import { sessionsDb } from '@/modules/database/index.js';
 import {
+  buildCloudCliSessionName,
   buildLookupMap,
+  extractCodexTextContent,
   extractFirstValidJsonlData,
   findFilesRecursivelyCreatedAfter,
   normalizeSessionName,
+  parseFilesInputTag,
   readFileTimestamps,
-} from '@/shared/utils.js';
-import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
+  readObjectRecord,
+} from '@/shared/index.js';
+import type { IProviderSessionSynchronizer } from '@/shared/index.js';
 
-type ParsedSession = {
-  sessionId: string;
-  projectPath: string;
-  sessionName?: string;
-};
+const UNTITLED = 'Untitled Codex Session';
 
-/**
- * Session indexer for Codex transcript artifacts.
- */
+async function readLegacyOpeningName(filePath: string): Promise<string | undefined> {
+  const first = await extractFirstValidJsonlData(filePath, (entry) => {
+    const row = readObjectRecord(entry);
+    const payload = readObjectRecord(row?.payload);
+    if (row?.type !== 'event_msg' || !payload) return null;
+    if (payload.type === 'user_message' && (!payload.kind || payload.kind === 'plain') && typeof payload.message === 'string') {
+      return { text: payload.message };
+    }
+    const item = readObjectRecord(payload.item);
+    if (payload.type === 'item_completed' && item?.type === 'UserMessage') {
+      return { text: extractCodexTextContent(item.content) };
+    }
+    return null;
+  });
+  const text = first && parseFilesInputTag(first.text).text;
+  return text?.trim() ? buildCloudCliSessionName(text) : undefined;
+}
+
+/** The providers module indexes Codex rollouts and reconciles thread names from their separate index. */
 export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
   private readonly provider = 'codex' as const;
-  private readonly codexHome = path.join(os.homedir(), '.codex');
+  private readonly codexHome = path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'));
+  readonly nameIndexPath = path.join(this.codexHome, 'session_index.jsonl');
+  private nameIndex?: { revision: string; names: Promise<Map<string, string>> };
+  private legacyOpeningNames = new Map<string, string>();
+  private pendingNames: Promise<unknown> = Promise.resolve();
 
-  /**
-   * Scans ~/.codex/sessions and upserts discovered sessions into DB.
-   */
   async synchronize(since?: Date): Promise<number> {
-    const nameMap = await buildLookupMap(path.join(this.codexHome, 'session_index.jsonl'), 'id', 'thread_name');
-    const files = await findFilesRecursivelyCreatedAfter(
-      path.join(this.codexHome, 'sessions'),
-      '.jsonl',
-      since ?? null
-    );
-
+    const names = await this.readNameIndex();
+    const files = await findFilesRecursivelyCreatedAfter(path.join(this.codexHome, 'sessions'), '.jsonl', since ?? null);
     let processed = 0;
     for (const filePath of files) {
-      const parsed = await this.processSessionFile(filePath, nameMap);
-      if (!parsed) {
-        continue;
-      }
-
-      const existingSession = sessionsDb.getSessionByProviderSessionId(parsed.sessionId)
-        ?? sessionsDb.getSessionById(parsed.sessionId);
-      if (existingSession) {
-        // If session name is untitled and we now have a name, update it
-        if (existingSession.custom_name === 'Untitled Codex Session' && parsed.sessionName && parsed.sessionName !== 'Untitled Codex Session') {
-          sessionsDb.updateSessionCustomName(existingSession.session_id, parsed.sessionName);
-        }
-      }
-
-      const timestamps = await readFileTimestamps(filePath);
-      sessionsDb.createSession(
-        parsed.sessionId,
-        this.provider,
-        parsed.projectPath,
-        parsed.sessionName,
-        timestamps.createdAt,
-        timestamps.updatedAt,
-        filePath
-      );
-      processed += 1;
+      if (await this.upsertRollout(filePath, names)) processed += 1;
     }
 
+    // A title can appear long after its rollout's birthtime. A refresh that
+    // sees the change before the watcher must announce it to other clients too.
+    const changed = await this.synchronizeNames();
+    if (changed.length) {
+      const { broadcastSessionUpsertedBatch } = await import('@/modules/websocket/index.js');
+      await broadcastSessionUpsertedBatch(changed, { titleOnly: true });
+    }
     return processed;
   }
 
-  /**
-   * Parses and upserts one Codex session JSONL file.
-   */
   async synchronizeFile(filePath: string): Promise<string | null> {
-    if (!filePath.endsWith('.jsonl')) {
-      return null;
-    }
-
-    const nameMap = await buildLookupMap(path.join(this.codexHome, 'session_index.jsonl'), 'id', 'thread_name');
-    const parsed = await this.processSessionFile(filePath, nameMap);
-    if (!parsed) {
-      return null;
-    }
-
-    const timestamps = await readFileTimestamps(filePath);
-    return sessionsDb.createSession(
-      parsed.sessionId,
-      this.provider,
-      parsed.projectPath,
-      parsed.sessionName,
-      timestamps.createdAt,
-      timestamps.updatedAt,
-      filePath
-    );
+    if (!filePath.endsWith('.jsonl') || filePath === this.nameIndexPath) return null;
+    const parsed = await this.upsertRollout(filePath, await this.readNameIndex());
+    if (!parsed) return null;
+    await this.synchronizeNames(parsed.providerSessionId);
+    return parsed.appSessionId;
   }
 
-  /**
-   * Extracts session metadata from one Codex JSONL session file.
-   */
-  private async processSessionFile(
-    filePath: string,
-    nameMap: Map<string, string>
-  ): Promise<ParsedSession | null> {
+  /** The sessions watcher uses this for title-only index writes, including multiple renames in one poll. */
+  synchronizeNames(providerSessionId?: string): Promise<string[]> {
+    // Legacy verification reads a rollout asynchronously. Serialize index writes
+    // so an older snapshot cannot overwrite a newer rename after that read.
+    const updated = this.pendingNames.then(async () => {
+      const names = await this.readNameIndex();
+      const changed: string[] = [];
+      const threadIds = providerSessionId ? [providerSessionId] : names.keys();
+      for (const threadId of threadIds) {
+        const name = names.get(threadId);
+        if (!name) continue;
+        const session = sessionsDb.getSessionByProviderSessionId(threadId);
+        if (!session || session.provider !== this.provider || session.name_source === 'manual') continue;
+        const title = normalizeSessionName(name, UNTITLED);
+        if (session.name_source === 'provider' && session.custom_name === title) continue;
+        const legacyFallback = session.name_source === 'legacy' && session.session_id !== threadId && session.jsonl_path
+          ? await this.getLegacyOpeningName(session.jsonl_path)
+          : undefined;
+        const appId = sessionsDb.applyCodexThreadName(threadId, title, legacyFallback);
+        if (appId) changed.push(appId);
+      }
+      return changed;
+    });
+    this.pendingNames = updated.catch(() => {});
+    return updated;
+  }
+
+  private async getLegacyOpeningName(filePath: string): Promise<string | undefined> {
+    // A rollout's opening prompt is immutable. When a file has no prompt yet,
+    // leave it uncached so its next write can supply the evidence.
+    const cached = this.legacyOpeningNames.get(filePath);
+    if (cached !== undefined) return cached;
+    const opening = await readLegacyOpeningName(filePath);
+    if (opening !== undefined) this.legacyOpeningNames.set(filePath, opening);
+    return opening;
+  }
+
+  private async readNameIndex(): Promise<Map<string, string>> {
+    let info;
+    try {
+      info = await stat(this.nameIndexPath);
+    } catch {
+      this.nameIndex = undefined;
+      return new Map();
+    }
+    const revision = [info.ino, info.size, info.ctimeMs, info.mtimeMs].join('/');
+    if (revision !== this.nameIndex?.revision) {
+      this.nameIndex = {
+        revision,
+        names: buildLookupMap(this.nameIndexPath, 'id', 'thread_name', 'last-nonblank'),
+      };
+    }
+    return this.nameIndex.names;
+  }
+
+  private async upsertRollout(filePath: string, names: Map<string, string>) {
     const parsed = await extractFirstValidJsonlData(filePath, (rawData) => {
-      const data = rawData as Record<string, unknown>;
-      const payload = data.payload as Record<string, unknown> | undefined;
+      const data = readObjectRecord(rawData);
+      const payload = readObjectRecord(data?.payload);
       const sessionId = typeof payload?.id === 'string' ? payload.id : undefined;
       const projectPath = typeof payload?.cwd === 'string' ? payload.cwd : undefined;
 
@@ -135,23 +161,16 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
     // ids must be resolved through the provider-id mapping first.
     const existingSession = sessionsDb.getSessionByProviderSessionId(parsed.sessionId)
       ?? sessionsDb.getSessionById(parsed.sessionId);
-    const existingSessionName = existingSession?.custom_name;
-    if (existingSessionName && existingSessionName !== 'Untitled Codex Session') {
-      return {
-        ...parsed,
-        sessionName: normalizeSessionName(existingSessionName, 'Untitled Codex Session'),
-      };
+    let fallback = existingSession?.custom_name;
+    if ((!fallback || fallback === UNTITLED) && !names.has(parsed.sessionId)) {
+      fallback = normalizeSessionName(await this.extractLastAgentMessageFromEnd(filePath), UNTITLED);
     }
-
-    let sessionName = nameMap.get(parsed.sessionId);
-    if (!sessionName) {
-      sessionName = await this.extractLastAgentMessageFromEnd(filePath);
-    }
-
-    return {
-      ...parsed,
-      sessionName: normalizeSessionName(sessionName, 'Untitled Codex Session'),
-    };
+    const timestamps = await readFileTimestamps(filePath);
+    const appSessionId = sessionsDb.createSession(
+      parsed.sessionId, this.provider, parsed.projectPath, fallback || UNTITLED,
+      timestamps.createdAt, timestamps.updatedAt, filePath,
+    );
+    return { appSessionId, providerSessionId: parsed.sessionId };
   }
 
   /**
@@ -210,3 +229,6 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
     return undefined;
   }
 }
+
+/** Shared by the provider registry and the session watcher so index reads and writes stay ordered. */
+export const codexSessionSynchronizer = new CodexSessionSynchronizer();

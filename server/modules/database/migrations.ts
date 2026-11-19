@@ -441,6 +441,24 @@ const addForkedFromSessionIdColumn = (db: Database): void => {
   addColumnToTableIfNotExists(db, 'sessions', columnNames, 'forked_from_session_id', 'TEXT');
 };
 
+/** Preserve old names of unknown origin while identifying Codex forks and placeholders. */
+const addSessionNameSource = (db: Database): void => {
+  const columns = getTableInfo(db, 'sessions').map((column) => column.name);
+  if (columns.includes('name_source')) return;
+
+  db.transaction(() => {
+    addColumnToTableIfNotExists(db, 'sessions', columns, 'name_source', "TEXT NOT NULL DEFAULT 'legacy'");
+    db.exec(`
+      UPDATE sessions
+      SET name_source = CASE WHEN forked_from_session_id IS NOT NULL THEN 'manual' ELSE 'fallback' END
+      WHERE provider = 'codex'
+        AND (forked_from_session_id IS NOT NULL OR COALESCE(trim(custom_name), '') IN (
+          '', 'Untitled Codex Session', 'Untitled Session'
+        ))
+    `);
+  })();
+};
+
 /**
  * Adds the `model` column that records which model each session runs with.
  *
@@ -545,6 +563,7 @@ export const runMigrations = (db: Database) => {
     addSessionModelColumn(db);
     addSessionEffortColumn(db);
     addForkedFromSessionIdColumn(db);
+    addSessionNameSource(db);
     ensureProjectsForSessionPaths(db);
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);
 

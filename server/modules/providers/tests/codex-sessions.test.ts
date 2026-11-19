@@ -1,18 +1,22 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { closeConnection, getConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import { CodexSessionSynchronizer } from '@/modules/providers/list/codex/codex-session-synchronizer.provider.js';
 import { CodexSessionsProvider, parseCodexExecScript, readCodexMemoryCitations } from '@/modules/providers/list/codex/codex-sessions.provider.js';
 
 const patchHomeDir = (nextHomeDir: string) => {
   const original = os.homedir;
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = path.join(nextHomeDir, '.codex');
   (os as any).homedir = () => nextHomeDir;
   return () => {
     (os as any).homedir = original;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
   };
 };
 
@@ -127,6 +131,69 @@ test('Codex synchronizer skips sub-agent rollout files', { concurrency: false },
   } finally {
     restoreHomeDir();
     await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('Codex reconciles the latest named thread even when only its index changed since the last scan', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-named-rollout-'));
+  const restoreHomeDir = patchHomeDir(home);
+  try {
+    const rollout = await writeCodexTranscript(home, 'thread', home, '请帮我修复这个登录错误');
+    const sync = new CodexSessionSynchronizer();
+    await withIsolatedDatabase(async () => {
+      sessionsDb.createAppSession('app', 'codex', home, '请帮我修复这个登录错误');
+      sessionsDb.assignProviderSessionId('app', 'thread');
+      await writeFile(sync.nameIndexPath, '{"id":"thread","thread_name":"登录问题"}\n');
+      assert.equal(await sync.synchronizeFile(rollout), 'app');
+      assert.equal(sessionsDb.getSessionById('app')?.custom_name, '登录问题');
+
+      sessionsDb.updateSessionIsArchived('app', true);
+      const activity = sessionsDb.getSessionById('app')?.updated_at;
+      await appendFile(sync.nameIndexPath, [
+        '{invalid line', 'null', '{"id":"thread","thread_name":"修复登录重定向"}',
+        '{"id":"thread","thread_name":" "}', '',
+      ].join('\n'));
+      assert.equal(await sync.synchronize(new Date(Date.now() + 60_000)), 0);
+      assert.equal(sessionsDb.getSessionById('app')?.custom_name, '修复登录重定向');
+      assert.equal(sessionsDb.getSessionById('app')?.updated_at, activity);
+      assert.equal(sessionsDb.getSessionById('app')?.isArchived, 1);
+      assert.deepEqual(await sync.synchronizeNames(), []);
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('Codex upgrades only verified opening-message previews on legacy app rows', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-legacy-titles-'));
+  const restoreHomeDir = patchHomeDir(home);
+  try {
+    const sync = new CodexSessionSynchronizer();
+    await withIsolatedDatabase(async () => {
+      const opening = 'Review the deployment scripts for production';
+      for (const [id, oldTitle] of [['preview', 'Review the deployment scripts'], ['typed', 'Review the deployment scripts'], ['custom', 'My custom title']]) {
+        const rollout = await writeCodexTranscript(home, id, home, id === 'typed' ? undefined : opening);
+        if (id === 'typed') {
+          await appendFile(rollout, JSON.stringify({
+            type: 'event_msg', payload: { type: 'item_completed', item: {
+              type: 'UserMessage', content: [{ type: 'text', text: opening }],
+            } },
+          }) + '\n');
+        }
+        sessionsDb.createAppSession(`app-${id}`, 'codex', home, oldTitle);
+        sessionsDb.assignProviderSessionId(`app-${id}`, id);
+        await sync.synchronizeFile(rollout);
+        await appendFile(sync.nameIndexPath, JSON.stringify({ id, thread_name: 'Deployment audit' }) + '\n');
+      }
+      getConnection().exec("UPDATE sessions SET name_source = 'legacy'");
+      assert.deepEqual(await sync.synchronizeNames(), ['app-preview', 'app-typed']);
+      assert.equal(sessionsDb.getSessionById('app-preview')?.custom_name, 'Deployment audit');
+      assert.equal(sessionsDb.getSessionById('app-custom')?.custom_name, 'My custom title');
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(home, { recursive: true, force: true });
   }
 });
 
