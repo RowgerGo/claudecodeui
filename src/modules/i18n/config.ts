@@ -164,6 +164,7 @@ import ptBRGit from '@/modules/i18n/locales/pt-BR/git.json';
 
 // Import supported languages configuration
 import { languages } from '@/modules/i18n/languages';
+import { APP_DISPLAY_NAME } from '@/shared/constants';
 import {
   readUserPreference,
   subscribeToUserPreferences,
@@ -358,6 +359,7 @@ git: enGit,
 
     // Interpolation settings
     interpolation: {
+      defaultVariables: { appName: APP_DISPLAY_NAME },
       escapeValue: false, // React already escapes values
     },
 

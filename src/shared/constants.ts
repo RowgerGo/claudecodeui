@@ -19,8 +19,11 @@ type GitStatusFileGroup = 'modified' | 'added' | 'deleted' | 'untracked';
 
 //----------------- BRANDING ------------
 
+/** Product name shown in the web interface, localized copy and browser tab. */
+export const APP_DISPLAY_NAME = '橘子AI';
+
 /**
- * Font stack used to render the CloudCLI wordmark consistently wherever the brand name
+ * Font stack used to render the application wordmark consistently wherever the brand name
  * appears as text. Apply it inline so the wordmark does not inherit a themed font.
  */
 export const CLOUDCLI_WORDMARK_FONT_FAMILY =

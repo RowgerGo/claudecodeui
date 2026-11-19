@@ -5,8 +5,15 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
 import { i18n } from '@/modules/i18n';
+import { languages } from '@/modules/i18n/languages';
 import zhCNGit from '@/modules/i18n/locales/zh-CN/git.json';
 import zhTWGit from '@/modules/i18n/locales/zh-TW/git.json';
+
+test.each(languages.map(language => language.value))('%s shows the fork name in its sidebar, loading screen and login', lng => {
+  expect(i18n.t('sidebar:app.title', { lng })).toBe('橘子AI');
+  expect(i18n.t('common:mainContent.loading', { lng })).toContain('橘子AI');
+  expect(i18n.t('auth:login.description', { lng })).toContain('橘子AI');
+});
 
 /**
  * Guards the class of bug behind the "Git panel is still English in Chinese"
