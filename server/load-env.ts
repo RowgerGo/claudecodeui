@@ -38,6 +38,18 @@ try {
   console.error('No .env file found or error reading it:', e.message);
 }
 
+// OpenCode's installer adds this directory in shell startup files, which are
+// not read by service managers or the non-interactive shell used by the UI.
+// Append it so an executable already available on PATH keeps precedence. Keep
+// it even before installation so a later install works without another restart.
+if (process.platform !== 'win32') {
+  const openCodeBin = path.join(os.homedir(), '.opencode', 'bin');
+  const currentPath = process.env.PATH ?? '/usr/bin:/bin';
+  if (!currentPath.split(path.delimiter).includes(openCodeBin)) {
+    process.env.PATH = `${currentPath}${path.delimiter}${openCodeBin}`;
+  }
+}
+
 // Keep the default database in a stable user-level location so rebuilding dist-server
 // never changes where the backend stores auth.db when DATABASE_PATH is not set explicitly.
 const DEFAULT_DATABASE_PATH = path.join(os.homedir(), '.cloudcli', 'auth.db');
