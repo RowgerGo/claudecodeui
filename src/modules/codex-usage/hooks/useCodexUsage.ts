@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { ApiRequestError, api, readApiJson } from '@/shared/api';
 import type { CodexRateLimits } from '@/shared/types';
 import { createChatRequestId } from '@/shared/utils';
+
+const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 
 type Snapshot = {
   data: CodexRateLimits | null;
@@ -14,10 +16,10 @@ type Snapshot = {
 const RESET_OUTCOMES = ['reset', 'alreadyRedeemed', 'nothingToReset', 'noCredit'] as const;
 type ResetOutcome = typeof RESET_OUTCOMES[number];
 
-/** Reads plan limits and reset credits when the user clicks Refresh in the details dialog. */
+/** Keeps the workspace header and its details dialog on the same ten-minute refresh cycle. */
 export function useCodexUsage() {
   // Keep the last limits visible while fetching and require a fresh read after using a reset credit.
-  const [snapshot, setSnapshot] = useState<Snapshot>({ data: null, creditsCurrent: false, loading: false, error: null });
+  const [snapshot, setSnapshot] = useState<Snapshot>({ data: null, creditsCurrent: false, loading: true, error: null });
   // Disables all redemption actions while a confirmed request is in flight.
   const [redeeming, setRedeeming] = useState(false);
   // Reports the most recent user-initiated redemption to the open dialog.
@@ -26,9 +28,7 @@ export function useCodexUsage() {
   const redemptionInFlight = useRef(false);
   const attempts = useRef(new Map<string, string>());
 
-  useEffect(() => () => refreshController.current?.abort(), []);
-
-  async function refresh() {
+  const refresh = useCallback(async () => {
     if (refreshController.current || redemptionInFlight.current) return;
     const controller = new AbortController();
     refreshController.current = controller;
@@ -47,9 +47,21 @@ export function useCodexUsage() {
         });
       }
     } finally {
-      refreshController.current = null;
+      if (refreshController.current === controller) refreshController.current = null;
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    // Let StrictMode's initial cleanup cancel the first mount before it starts a request.
+    const initialRefresh = window.setTimeout(refresh, 0);
+    const timer = window.setInterval(refresh, REFRESH_INTERVAL_MS);
+    return () => {
+      window.clearTimeout(initialRefresh);
+      window.clearInterval(timer);
+      refreshController.current?.abort();
+      refreshController.current = null;
+    };
+  }, [refresh]);
 
   // Called exclusively by the dialog after the user confirms a specific eligible credit.
   async function consumeConfirmedCredit(creditId: string) {

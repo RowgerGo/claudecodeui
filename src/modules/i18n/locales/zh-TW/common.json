@@ -19,10 +19,10 @@
   },
   "codexUsage": {
     "details": "Codex 額度詳情",
+    "refresh": "重新整理 Codex 額度",
     "viewDetails": "詳情",
     "weekly": "{{pool}} 週額度已用 {{value}}",
     "weeklyLabel": "Codex 週額度",
-    "awaitingRefresh": "等待重新整理",
     "refreshPrompt": "點擊「重新整理」取得最新額度。",
     "used": "已用 {{value}}",
     "resetsAt": "{{time}} 重設",

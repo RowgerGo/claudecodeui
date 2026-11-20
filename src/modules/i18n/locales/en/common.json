@@ -19,10 +19,10 @@
   },
   "codexUsage": {
     "details": "Codex usage details",
+    "refresh": "Refresh Codex usage",
     "viewDetails": "Details",
     "weekly": "{{pool}} weekly · {{value}} used",
     "weeklyLabel": "Codex weekly usage",
-    "awaitingRefresh": "Awaiting refresh",
     "refreshPrompt": "Click Refresh to load the latest limits.",
     "used": "{{value}} used",
     "resetsAt": "Resets {{time}}",
