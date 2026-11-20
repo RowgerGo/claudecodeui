@@ -22,6 +22,8 @@
     "viewDetails": "详情",
     "weekly": "{{pool}} 周额度已用 {{value}}",
     "weeklyLabel": "Codex 周额度",
+    "awaitingRefresh": "待刷新",
+    "refreshPrompt": "点击「刷新」获取最新额度。",
     "used": "已用 {{value}}",
     "resetsAt": "{{time}} 重置",
     "unknownReset": "重置时间未知",

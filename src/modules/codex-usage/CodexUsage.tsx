@@ -115,10 +115,10 @@ function FreeResets({ data, busy, confirmCredit }: {
 export function CodexUsage() {
   const { t, i18n } = useTranslation();
   const titleId = useId();
-  // Opening the dialog requests the full plan and individual free reset credits.
+  // Controls the details dialog independently of the last refresh.
   const [open, setOpen] = useState(false);
-  const { snapshot, refresh, redeeming, outcome, consumeConfirmedCredit } = useCodexUsage(open);
-  const { data, details, error, loading } = snapshot;
+  const { snapshot, refresh, redeeming, outcome, consumeConfirmedCredit } = useCodexUsage();
+  const { data, creditsCurrent, error, loading } = snapshot;
   // Prefer the general plan when Codex also returns independent model-specific windows.
   const weeklyPools = data?.limits.filter(limit => limit.windows.some(window => window.windowDurationMins === WEEK_MINUTES));
   const pool = weeklyPools?.find(limit => limit.id.toLowerCase() === 'codex') ?? weeklyPools?.[0];
@@ -128,7 +128,8 @@ export function CodexUsage() {
     value: percentUsed(weekly.usedPercent, i18n.language),
   }) : t('codexUsage.weeklyLabel');
   const resetTime = weekly?.resetsAt ? t('codexUsage.resetsAt', { time: formatTime(weekly.resetsAt, i18n.language, true) })
-    : weekly ? t('codexUsage.unknownReset') : loading ? t('status.loading') : t('codexUsage.unavailable');
+    : weekly ? t('codexUsage.unknownReset')
+    : loading ? t('status.loading') : t(data || error !== null ? 'codexUsage.unavailable' : 'codexUsage.awaitingRefresh');
   const title = t('codexUsage.details');
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -147,16 +148,21 @@ export function CodexUsage() {
       <DialogContent aria-labelledby={titleId} className="max-h-[85dvh] w-[calc(100vw-1.5rem)] max-w-md overflow-y-auto p-4 sm:p-5">
         <div className="flex items-center gap-1">
           <DialogTitle id={titleId} className="not-sr-only me-auto text-base font-semibold">{title}</DialogTitle>
-          <Button type="button" size="icon" variant="ghost" className="h-8 w-8" aria-label={t('buttons.refresh')} title={t('buttons.refresh')}
-            disabled={loading || redeeming} onClick={refresh}><RefreshCw aria-hidden="true" className={cn(loading && 'animate-spin')} /></Button>
+          <Button type="button" size="sm" variant="ghost" className="h-8 shrink-0" disabled={loading || redeeming} onClick={refresh}>
+            <RefreshCw aria-hidden="true" className={cn(loading && 'animate-spin')} />
+            {t('buttons.refresh')}
+          </Button>
           <Button type="button" size="icon" variant="ghost" className="h-8 w-8" aria-label={t('buttons.close')} onClick={() => setOpen(false)}><X aria-hidden="true" /></Button>
         </div>
         <div className="mt-4 space-y-5">
           {error !== null && <p role="alert" className="text-sm text-destructive">{error || t('codexUsage.readError')}</p>}
           {data && <PlanLimits data={data} />}
-          {data && details && <FreeResets data={data} busy={loading || redeeming} confirmCredit={consumeConfirmedCredit} />}
-          {error === null && !details && <p role="status" className="text-sm text-muted-foreground">{t('status.loading')}</p>}
+          {data && creditsCurrent && <FreeResets data={data} busy={loading || redeeming} confirmCredit={consumeConfirmedCredit} />}
+          {loading && <p role="status" className="text-sm text-muted-foreground">{t('status.loading')}</p>}
           {(redeeming || outcome) && <p role="status" className="text-sm">{t(redeeming ? 'codexUsage.applying' : `codexUsage.outcomes.${outcome}`)}</p>}
+          {error === null && !creditsCurrent && !loading && !redeeming && (
+            <p className="text-sm text-muted-foreground">{t('codexUsage.refreshPrompt')}</p>
+          )}
         </div>
       </DialogContent>
     </Dialog>
